@@ -63,6 +63,10 @@ def parse_args() -> argparse.Namespace:
                         help="Speed assignment method for the final path")
     parser.add_argument("--straight-steering-threshold", type=float, default=0.08,
                         help="Maximum |steering| that still counts as a straight [rad]")
+    parser.add_argument("--turn-steering-threshold", type=float, default=0.20,
+                        help="Minimum |steering| that counts as an active turn [rad]")
+    parser.add_argument("--approach-lookahead-m", type=float, default=0.5,
+                        help="Lookahead distance used to mark approaching turns [m]")
     parser.add_argument("--gentle-steering-threshold", type=float, default=0.20,
                         help="Maximum |steering| for the gentle-bend speed tier [rad]")
     parser.add_argument("--medium-steering-threshold", type=float, default=0.38,
@@ -450,6 +454,48 @@ def piecewise_speed_from_previous_steering(
     return speed
 
 
+def classify_turn_states(
+    steering: np.ndarray,
+    spacing: float,
+    straight_threshold: float,
+    turn_threshold: float,
+    approach_lookahead_m: float,
+) -> list[str]:
+    if spacing <= 0.0:
+        raise ValueError("Classification spacing must be positive")
+    if straight_threshold < 0.0:
+        raise ValueError("Straight classification threshold must be non-negative")
+    if turn_threshold < straight_threshold:
+        raise ValueError("Turn threshold must be greater than or equal to the straight threshold")
+    if approach_lookahead_m < 0.0:
+        raise ValueError("Approach lookahead distance must be non-negative")
+
+    lookahead_count = max(1, int(math.ceil(approach_lookahead_m / spacing)))
+    labels: list[str] = []
+    for index, value in enumerate(steering):
+        magnitude = abs(value)
+        if magnitude >= turn_threshold:
+            labels.append("L" if value > 0.0 else "R")
+            continue
+        if magnitude > straight_threshold:
+            labels.append("S")
+            continue
+
+        future = np.roll(steering, -index)[1:lookahead_count + 1]
+        if len(future) == 0:
+            labels.append("S")
+            continue
+        strong_left = np.any(future >= turn_threshold)
+        strong_right = np.any(future <= -turn_threshold)
+        if strong_left and not strong_right:
+            labels.append("ASL")
+        elif strong_right and not strong_left:
+            labels.append("ASR")
+        else:
+            labels.append("S")
+    return labels
+
+
 def smooth_with_steering_limit(points: np.ndarray, field: MapField,
                                clearance: float, wheelbase: float,
                                spacing: float, maximum_steering: float) -> np.ndarray:
@@ -506,12 +552,15 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
                      include_spacing_rule: bool = True,
                      fixed_spacing: float | None = None,
                      include_speed: bool = False,
+                     include_turn_state: bool = False,
                      speed_profile: str = "piecewise",
                      speed_steering_min: float = 0.0,
                      speed_steering_max: float = 0.58,
                      min_speed: float = 1.0,
                      max_speed: float = 5.0,
                      straight_steering_threshold: float = 0.08,
+                     turn_steering_threshold: float = 0.20,
+                     approach_lookahead_m: float = 0.5,
                      gentle_steering_threshold: float = 0.20,
                      medium_steering_threshold: float = 0.38,
                      straight_speed: float = 10.0,
@@ -534,6 +583,17 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
     if include_spacing_rule:
         spacing_rule = np.asarray([spacing_for_steering(value) for value in steering])
         header.append("spacing_rule")
+    turn_state = None
+    if include_turn_state:
+        point_spacing = fixed_spacing if fixed_spacing is not None else float(np.mean(segment_lengths))
+        turn_state = classify_turn_states(
+            steering,
+            point_spacing,
+            straight_steering_threshold,
+            turn_steering_threshold,
+            approach_lookahead_m,
+        )
+        header.append("turn_state")
     speed = None
     if include_speed:
         if speed_profile == "linear":
@@ -567,6 +627,8 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
         ]
         if spacing_rule is not None:
             row.append(spacing_rule[index])
+        if turn_state is not None:
+            row.append(turn_state[index])
         if speed is not None:
             row.append(speed[index])
         rows.append(row)
@@ -714,12 +776,15 @@ def main() -> int:
         return 2
     export_waypoints(final_csv, final_waypoints, args.wheelbase,
                      include_spacing_rule=False, fixed_spacing=args.final_spacing,
+                     include_turn_state=True,
                      speed_profile=args.speed_profile,
                      include_speed=True,
                      speed_steering_min=args.speed_steering_min,
                      speed_steering_max=args.speed_steering_max,
                      min_speed=args.min_speed, max_speed=args.max_speed,
                      straight_steering_threshold=args.straight_steering_threshold,
+                     turn_steering_threshold=args.turn_steering_threshold,
+                     approach_lookahead_m=args.approach_lookahead_m,
                      gentle_steering_threshold=args.gentle_steering_threshold,
                      medium_steering_threshold=args.medium_steering_threshold,
                      straight_speed=args.straight_speed,

@@ -102,19 +102,26 @@ def _normalize_final_csv(source_csv: Path, destination_csv: Path) -> None:
                 f'{source_csv} is missing required columns: {", ".join(missing_fields)}.'
             )
         speed_field = 'speed' if 'speed' in reader.fieldnames else None
+        turn_state_field = 'turn_state' if 'turn_state' in reader.fieldnames else None
 
         with destination_csv.open('w', newline='') as destination_stream:
             writer = csv.writer(destination_stream, delimiter=';')
-            writer.writerow(['s', 'x', 'y', 'yaw', 'kappa', 'v'])
+            header = ['s', 'x', 'y', 'yaw', 'kappa', 'v']
+            if turn_state_field is not None:
+                header.append('turn_state')
+            writer.writerow(header)
             for row in reader:
-                writer.writerow([
+                output_row = [
                     row['s'],
                     row['x'],
                     row['y'],
                     row['yaw'],
                     row['kappa'],
                     row[speed_field] if speed_field is not None else '10.00000000',
-                ])
+                ]
+                if turn_state_field is not None:
+                    output_row.append(row[turn_state_field])
+                writer.writerow(output_row)
 
 
 class ProcessRacelineNode(Node):
@@ -143,6 +150,8 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('max_speed', 10.0)
         self.declare_parameter('speed_profile', 'piecewise')
         self.declare_parameter('straight_steering_threshold', 0.08)
+        self.declare_parameter('turn_steering_threshold', 0.20)
+        self.declare_parameter('approach_lookahead_m', 0.5)
         self.declare_parameter('gentle_steering_threshold', 0.20)
         self.declare_parameter('medium_steering_threshold', 0.38)
         self.declare_parameter('straight_speed', 10.0)
@@ -220,6 +229,8 @@ class ProcessRacelineNode(Node):
                 ('--max-speed', 'max_speed'),
                 ('--speed-profile', 'speed_profile'),
                 ('--straight-steering-threshold', 'straight_steering_threshold'),
+                ('--turn-steering-threshold', 'turn_steering_threshold'),
+                ('--approach-lookahead-m', 'approach_lookahead_m'),
                 ('--gentle-steering-threshold', 'gentle_steering_threshold'),
                 ('--medium-steering-threshold', 'medium_steering_threshold'),
                 ('--straight-speed', 'straight_speed'),
