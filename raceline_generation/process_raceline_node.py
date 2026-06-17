@@ -150,8 +150,8 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('max_speed', 10.0)
         self.declare_parameter('speed_profile', 'piecewise')
         self.declare_parameter('straight_steering_threshold', 0.08)
-        self.declare_parameter('turn_steering_threshold', 0.20)
-        self.declare_parameter('approach_lookahead_m', 0.5)
+        self.declare_parameter('turn_angle_threshold_deg', 30.0)
+        self.declare_parameter('turn_distance_threshold_m', 1.5)
         self.declare_parameter('gentle_steering_threshold', 0.20)
         self.declare_parameter('medium_steering_threshold', 0.38)
         self.declare_parameter('straight_speed', 10.0)
@@ -229,8 +229,8 @@ class ProcessRacelineNode(Node):
                 ('--max-speed', 'max_speed'),
                 ('--speed-profile', 'speed_profile'),
                 ('--straight-steering-threshold', 'straight_steering_threshold'),
-                ('--turn-steering-threshold', 'turn_steering_threshold'),
-                ('--approach-lookahead-m', 'approach_lookahead_m'),
+                ('--turn-angle-threshold-deg', 'turn_angle_threshold_deg'),
+                ('--turn-distance-threshold-m', 'turn_distance_threshold_m'),
                 ('--gentle-steering-threshold', 'gentle_steering_threshold'),
                 ('--medium-steering-threshold', 'medium_steering_threshold'),
                 ('--straight-speed', 'straight_speed'),

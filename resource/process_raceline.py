@@ -63,10 +63,10 @@ def parse_args() -> argparse.Namespace:
                         help="Speed assignment method for the final path")
     parser.add_argument("--straight-steering-threshold", type=float, default=0.08,
                         help="Maximum |steering| that still counts as a straight [rad]")
-    parser.add_argument("--turn-steering-threshold", type=float, default=0.20,
-                        help="Minimum |steering| that counts as an active turn [rad]")
-    parser.add_argument("--approach-lookahead-m", type=float, default=0.5,
-                        help="Lookahead distance used to mark approaching turns [m]")
+    parser.add_argument("--turn-angle-threshold-deg", type=float, default=30.0,
+                        help="Minimum accumulated heading change that counts as a turn [deg]")
+    parser.add_argument("--turn-distance-threshold-m", type=float, default=1.5,
+                        help="Maximum path distance within which the turn angle must be reached [m]")
     parser.add_argument("--gentle-steering-threshold", type=float, default=0.20,
                         help="Maximum |steering| for the gentle-bend speed tier [rad]")
     parser.add_argument("--medium-steering-threshold", type=float, default=0.38,
@@ -455,41 +455,44 @@ def piecewise_speed_from_previous_steering(
 
 
 def classify_turn_states(
-    steering: np.ndarray,
+    heading: np.ndarray,
     spacing: float,
-    straight_threshold: float,
-    turn_threshold: float,
-    approach_lookahead_m: float,
+    turn_angle_threshold_deg: float,
+    turn_distance_threshold_m: float,
 ) -> list[str]:
     if spacing <= 0.0:
         raise ValueError("Classification spacing must be positive")
-    if straight_threshold < 0.0:
-        raise ValueError("Straight classification threshold must be non-negative")
-    if turn_threshold < straight_threshold:
-        raise ValueError("Turn threshold must be greater than or equal to the straight threshold")
-    if approach_lookahead_m < 0.0:
-        raise ValueError("Approach lookahead distance must be non-negative")
+    if turn_angle_threshold_deg <= 0.0:
+        raise ValueError("Turn angle threshold must be positive")
+    if turn_distance_threshold_m <= 0.0:
+        raise ValueError("Turn distance threshold must be positive")
 
-    lookahead_count = max(1, int(math.ceil(approach_lookahead_m / spacing)))
+    angle_threshold = math.radians(turn_angle_threshold_deg)
+    window_count = max(1, int(math.ceil(turn_distance_threshold_m / spacing)))
+    half_window_count = max(1, window_count // 2)
+    deltas = np.arctan2(
+        np.sin(np.roll(heading, -1) - heading),
+        np.cos(np.roll(heading, -1) - heading),
+    )
+
+    def accumulated_change(start: int, steps: int) -> float:
+        total = 0.0
+        for offset in range(steps):
+            total += deltas[(start + offset) % len(deltas)]
+        return total
+
     labels: list[str] = []
-    for index, value in enumerate(steering):
-        magnitude = abs(value)
-        if magnitude >= turn_threshold:
-            labels.append("L" if value > 0.0 else "R")
-            continue
-        if magnitude > straight_threshold:
-            labels.append("S")
+    for index in range(len(heading)):
+        centered_start = (index - half_window_count) % len(heading)
+        centered_change = accumulated_change(centered_start, window_count)
+        if abs(centered_change) >= angle_threshold:
+            labels.append("L" if centered_change > 0.0 else "R")
             continue
 
-        future = np.roll(steering, -index)[1:lookahead_count + 1]
-        if len(future) == 0:
-            labels.append("S")
-            continue
-        strong_left = np.any(future >= turn_threshold)
-        strong_right = np.any(future <= -turn_threshold)
-        if strong_left and not strong_right:
+        forward_change = accumulated_change(index, window_count)
+        if forward_change >= angle_threshold:
             labels.append("ASL")
-        elif strong_right and not strong_left:
+        elif forward_change <= -angle_threshold:
             labels.append("ASR")
         else:
             labels.append("S")
@@ -559,8 +562,8 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
                      min_speed: float = 1.0,
                      max_speed: float = 5.0,
                      straight_steering_threshold: float = 0.08,
-                     turn_steering_threshold: float = 0.20,
-                     approach_lookahead_m: float = 0.5,
+                     turn_angle_threshold_deg: float = 30.0,
+                     turn_distance_threshold_m: float = 2.5,
                      gentle_steering_threshold: float = 0.20,
                      medium_steering_threshold: float = 0.38,
                      straight_speed: float = 10.0,
@@ -587,11 +590,10 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
     if include_turn_state:
         point_spacing = fixed_spacing if fixed_spacing is not None else float(np.mean(segment_lengths))
         turn_state = classify_turn_states(
-            steering,
+            heading,
             point_spacing,
-            straight_steering_threshold,
-            turn_steering_threshold,
-            approach_lookahead_m,
+            turn_angle_threshold_deg,
+            turn_distance_threshold_m,
         )
         header.append("turn_state")
     speed = None
@@ -783,8 +785,8 @@ def main() -> int:
                      speed_steering_max=args.speed_steering_max,
                      min_speed=args.min_speed, max_speed=args.max_speed,
                      straight_steering_threshold=args.straight_steering_threshold,
-                     turn_steering_threshold=args.turn_steering_threshold,
-                     approach_lookahead_m=args.approach_lookahead_m,
+                     turn_angle_threshold_deg=args.turn_angle_threshold_deg,
+                     turn_distance_threshold_m=args.turn_distance_threshold_m,
                      gentle_steering_threshold=args.gentle_steering_threshold,
                      medium_steering_threshold=args.medium_steering_threshold,
                      straight_speed=args.straight_speed,
