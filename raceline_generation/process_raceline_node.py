@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
+import math
 import shutil
-import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
@@ -20,6 +22,7 @@ DEFAULT_MAP_DIR = RACESTACK_REPO_ROOT / 'maps'
 DEFAULT_MANUAL_PATH_DIR = RACESTACK_REPO_ROOT / 'manual_paths'
 DEFAULT_OUTPUT_DIR = RACESTACK_REPO_ROOT / 'paths'
 DEFAULT_ARCHIVE_DIR = RACESTACK_REPO_ROOT / 'old_paths'
+ACTIVE_RACELINE_FILENAME = 'raceline.csv'
 
 
 def _find_single_file(directory: Path, patterns: tuple[str, ...], asset_name: str) -> Path:
@@ -53,6 +56,23 @@ def _resolve_processor_script() -> Path:
     raise FileNotFoundError('Could not locate resource/process_raceline.py in source or install space.')
 
 
+def _resolve_optimizer_script() -> Path:
+    script = RACESTACK_REPO_ROOT / 'resource' / 'bala_raceline_optimizer' / 'optimize_manual_map_raceline.py'
+    if script.is_file():
+        return script
+    raise FileNotFoundError(f'Could not locate optimizer script at {script}.')
+
+
+def _load_module(module_name: str, module_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f'Could not load module {module_name} from {module_path}.')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _unique_archive_dir(base_dir: Path) -> Path:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     candidate = base_dir / timestamp
@@ -81,13 +101,6 @@ def _archive_existing_outputs(output_dir: Path, archive_root: Path) -> list[Path
         shutil.move(str(path), str(destination))
         archived_paths.append(destination)
     return archived_paths
-
-
-def _extract_final_csv(stdout: str) -> Path:
-    for line in reversed(stdout.splitlines()):
-        if line.startswith('FINAL RACELINE CSV:'):
-            return Path(line.split(':', 1)[1].strip())
-    raise RuntimeError('Processor completed without reporting a final raceline CSV.')
 
 
 def _normalize_final_csv(source_csv: Path, destination_csv: Path) -> None:
@@ -124,6 +137,13 @@ def _normalize_final_csv(source_csv: Path, destination_csv: Path) -> None:
                 writer.writerow(output_row)
 
 
+def _roll_points_to_match_seed(points: np.ndarray, seed_start: np.ndarray) -> np.ndarray:
+    if len(points) == 0:
+        return points
+    start_idx = int(np.argmin(np.linalg.norm(points - seed_start, axis=1)))
+    return np.roll(points, -start_idx, axis=0)
+
+
 class ProcessRacelineNode(Node):
     def __init__(self) -> None:
         super().__init__('process_raceline')
@@ -132,7 +152,6 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('manual_path_directory', str(DEFAULT_MANUAL_PATH_DIR))
         self.declare_parameter('output_directory', str(DEFAULT_OUTPUT_DIR))
         self.declare_parameter('archive_directory', str(DEFAULT_ARCHIVE_DIR))
-        self.declare_parameter('python_executable', sys.executable)
         self.declare_parameter('max_isolated_pixels', 3)
         self.declare_parameter('wall_threshold', 100)
         self.declare_parameter('boundary_clearance', 0.25)
@@ -158,6 +177,13 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('gentle_speed', 6.0)
         self.declare_parameter('medium_speed', 4.0)
         self.declare_parameter('corner_speed', 1.5)
+        self.declare_parameter('optimizer_spacing', 0.20)
+        self.declare_parameter('optimizer_clearance', 0.25)
+        self.declare_parameter('optimizer_max_offset', 0.60)
+        self.declare_parameter('optimizer_racing_line_weight', 0.24)
+        self.declare_parameter('optimizer_apex_bias', 0.82)
+        self.declare_parameter('optimizer_outside_bias', 0.36)
+        self.declare_parameter('optimizer_max_iter', 300)
 
         self._startup_timer = self.create_timer(0.1, self._run_once)
         self._completed = False
@@ -192,88 +218,238 @@ class ProcessRacelineNode(Node):
         archive_directory = Path(
             str(self.get_parameter('archive_directory').value)
         ).expanduser().resolve()
-        python_executable = str(self.get_parameter('python_executable').value)
 
         map_yaml = _find_single_file(map_directory, ('*.yaml', '*.yml'), 'map')
         manual_path = _find_single_file(manual_path_directory, ('*.csv',), 'manual path')
         processor_script = _resolve_processor_script()
+        optimizer_script = _resolve_optimizer_script()
+        processor = _load_module('raceline_generation_process_raceline', processor_script)
+        optimizer = _load_module('racestack_bala_raceline_optimizer', optimizer_script)
 
         output_directory.mkdir(parents=True, exist_ok=True)
         archive_directory.mkdir(parents=True, exist_ok=True)
-
-        command = [
-            python_executable,
-            str(processor_script),
-            str(map_yaml),
-            str(manual_path),
-            '--output-dir',
-        ]
         with tempfile.TemporaryDirectory(prefix='raceline_generation_process_raceline_') as temp_dir:
             temp_output_dir = Path(temp_dir)
-            command.append(str(temp_output_dir))
-            for flag, parameter_name in (
-                ('--max-isolated-pixels', 'max_isolated_pixels'),
-                ('--wall-threshold', 'wall_threshold'),
-                ('--boundary-clearance', 'boundary_clearance'),
-                ('--wheelbase', 'wheelbase'),
-                ('--loop-radius', 'loop_radius'),
-                ('--max-local-loop', 'max_local_loop'),
-                ('--search-translation', 'search_translation'),
-                ('--search-rotation-deg', 'search_rotation_deg'),
-                ('--dense-spacing', 'dense_spacing'),
-                ('--max-final-steering', 'max_final_steering'),
-                ('--final-spacing', 'final_spacing'),
-                ('--speed-steering-min', 'speed_steering_min'),
-                ('--speed-steering-max', 'speed_steering_max'),
-                ('--min-speed', 'min_speed'),
-                ('--max-speed', 'max_speed'),
-                ('--speed-profile', 'speed_profile'),
-                ('--straight-steering-threshold', 'straight_steering_threshold'),
-                ('--turn-angle-threshold-deg', 'turn_angle_threshold_deg'),
-                ('--turn-distance-threshold-m', 'turn_distance_threshold_m'),
-                ('--gentle-steering-threshold', 'gentle_steering_threshold'),
-                ('--medium-steering-threshold', 'medium_steering_threshold'),
-                ('--straight-speed', 'straight_speed'),
-                ('--gentle-speed', 'gentle_speed'),
-                ('--medium-speed', 'medium_speed'),
-                ('--corner-speed', 'corner_speed'),
-            ):
-                command.extend((flag, str(self.get_parameter(parameter_name).value)))
-
             self.get_logger().info(
                 f'Processing manual path {manual_path} against map {map_yaml}.'
             )
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
+
+            with map_yaml.open() as stream:
+                metadata = processor.yaml.safe_load(stream)
+            image_path = Path(metadata['image'])
+            if not image_path.is_absolute():
+                image_path = map_yaml.parent / image_path
+            original_image = np.asarray(processor.Image.open(image_path).convert('L'), dtype=np.uint8)
+            cleaned_image, removed_components, removed_pixels = processor.clean_map(
+                original_image,
+                int(self.get_parameter('wall_threshold').value),
+                int(self.get_parameter('max_isolated_pixels').value),
+            )
+            cleaned_pgm = temp_output_dir / f'{image_path.stem}_cleaned.pgm'
+            cleaned_yaml = temp_output_dir / f'{image_path.stem}_cleaned.yaml'
+            processor.Image.fromarray(cleaned_image).save(cleaned_pgm)
+            cleaned_metadata = dict(metadata)
+            cleaned_metadata['image'] = cleaned_pgm.name
+            with cleaned_yaml.open('w') as stream:
+                processor.yaml.safe_dump(cleaned_metadata, stream, sort_keys=False)
+
+            boundary_clearance = float(self.get_parameter('boundary_clearance').value)
+            wheelbase = float(self.get_parameter('wheelbase').value)
+            final_spacing = float(self.get_parameter('final_spacing').value)
+            field = processor.MapField(
+                cleaned_image,
+                cleaned_metadata,
+                int(self.get_parameter('wall_threshold').value),
+            )
+            input_path = processor.load_xy(manual_path)
+            registration_source = processor.resample_closed(
+                input_path,
+                spacing=float(self.get_parameter('dense_spacing').value),
+            )
+            oriented, angle, translation = processor.orient_path(
+                registration_source,
+                field,
+                type(
+                    'ProcessorArgs',
+                    (),
+                    {
+                        'boundary_clearance': boundary_clearance,
+                        'search_translation': float(self.get_parameter('search_translation').value),
+                        'search_rotation_deg': float(self.get_parameter('search_rotation_deg').value),
+                    },
+                )(),
+            )
+            loop_cleaned = processor.erase_near_return_loops(
+                oriented,
+                float(self.get_parameter('loop_radius').value),
+                float(self.get_parameter('max_local_loop').value),
+            )
+            loop_cleaned = processor.erase_crossing_loops(
+                loop_cleaned,
+                float(self.get_parameter('max_local_loop').value),
+            )
+            loop_cleaned = processor.project_from_boundaries(
+                loop_cleaned,
+                field,
+                boundary_clearance,
+            )
+            dense = processor.resample_closed(
+                loop_cleaned,
+                spacing=float(self.get_parameter('dense_spacing').value),
+            )
+            dense = processor.project_from_boundaries(dense, field, boundary_clearance)
+            steering = np.arctan(wheelbase * processor.curvature(dense))
+            waypoints, _ = processor.adaptive_waypoints(dense, steering)
+            for _ in range(10):
+                previous_count = len(waypoints)
+                waypoints = processor.insert_safety_points(
+                    waypoints,
+                    dense,
+                    field,
+                    boundary_clearance,
+                )
+                if len(waypoints) == previous_count:
+                    break
+
+            smoothed_centerline = processor.smooth_with_steering_limit(
+                waypoints,
+                field,
+                boundary_clearance,
+                wheelbase,
+                final_spacing,
+                float(self.get_parameter('max_final_steering').value),
             )
 
-            if result.stdout.strip():
-                for line in result.stdout.strip().splitlines():
-                    self.get_logger().info(line)
-            if result.stderr.strip():
-                for line in result.stderr.strip().splitlines():
-                    self.get_logger().warn(line)
-            if result.returncode != 0:
+            straight_samples = np.vstack([
+                processor.straight_segment(
+                    smoothed_centerline[index],
+                    smoothed_centerline[(index + 1) % len(smoothed_centerline)],
+                    spacing=min(0.01, final_spacing / 5.0),
+                )
+                for index in range(len(smoothed_centerline))
+            ])
+            centerline_clearance = float(np.min(field.sample(field.signed_distance, straight_samples)))
+            centerline_max_steering = float(np.max(np.abs(
+                processor.steering_angles(smoothed_centerline, wheelbase),
+            )))
+            if centerline_clearance + 1e-4 < boundary_clearance:
                 raise RuntimeError(
-                    f'process_raceline.py failed with exit code {result.returncode}. '
-                    'The previous active path was left untouched.'
+                    'Smoothed centerline does not satisfy the configured boundary clearance '
+                    f'({centerline_clearance:.4f} m < {boundary_clearance:.4f} m).'
+                )
+            if centerline_max_steering >= float(self.get_parameter('max_final_steering').value):
+                raise RuntimeError(
+                    'Smoothed centerline exceeds the configured steering limit '
+                    f'({centerline_max_steering:.6f} rad).'
                 )
 
-            final_csv = _extract_final_csv(result.stdout)
-            if not final_csv.is_file():
-                raise FileNotFoundError(f'Final raceline CSV not found: {final_csv}')
+            optimizer_field = optimizer.MapField(cleaned_yaml)
+            optimizer_clearance = float(self.get_parameter('optimizer_clearance').value)
+            optimizer_spacing = float(self.get_parameter('optimizer_spacing').value)
+            optimizer_seed = optimizer.smooth_periodic(smoothed_centerline, final_spacing)
+            optimizer_base = optimizer.smooth_periodic(optimizer_seed, optimizer_spacing)
+            optimizer_normals = optimizer.normals_for(optimizer_base)
+            optimizer_bounds = optimizer.offset_bounds(
+                optimizer_field,
+                optimizer_base,
+                optimizer_normals,
+                optimizer_clearance,
+                float(self.get_parameter('optimizer_max_offset').value),
+            )
+            optimizer_offsets = optimizer.optimize_offsets(
+                optimizer_base,
+                optimizer_normals,
+                optimizer_bounds,
+                int(self.get_parameter('optimizer_max_iter').value),
+                float(self.get_parameter('optimizer_racing_line_weight').value),
+                float(self.get_parameter('optimizer_apex_bias').value),
+                float(self.get_parameter('optimizer_outside_bias').value),
+            )
+            optimized_sparse = optimizer_base + optimizer_offsets[:, None] * optimizer_normals
+            optimized_traj = optimizer.trajectory_from_path(
+                optimized_sparse,
+                optimizer_field,
+                final_spacing,
+                float(self.get_parameter('min_speed').value),
+                float(self.get_parameter('max_speed').value),
+                3.2,
+                2.5,
+                3.5,
+            )
+            optimized_points = optimizer.remove_duplicate_endpoint(optimized_traj[:, 1:3])
+            optimized_points = _roll_points_to_match_seed(optimized_points, smoothed_centerline[0])
+            optimized_points = processor.resample_closed_exact(optimized_points, final_spacing)
+            for _ in range(3):
+                optimized_points = processor.project_from_boundaries(
+                    optimized_points,
+                    field,
+                    boundary_clearance,
+                )
+                optimized_points = processor.resample_closed_exact(optimized_points, final_spacing)
+
+            optimized_samples = np.vstack([
+                processor.straight_segment(
+                    optimized_points[index],
+                    optimized_points[(index + 1) % len(optimized_points)],
+                    spacing=min(0.01, final_spacing / 5.0),
+                )
+                for index in range(len(optimized_points))
+            ])
+            optimized_clearance = float(np.min(field.sample(field.signed_distance, optimized_samples)))
+            if optimized_clearance + 1e-4 < boundary_clearance:
+                raise RuntimeError(
+                    'Optimized raceline does not satisfy the configured boundary clearance '
+                    f'({optimized_clearance:.4f} m < {boundary_clearance:.4f} m).'
+                )
+            optimized_csv = temp_output_dir / ACTIVE_RACELINE_FILENAME
+            processor.export_waypoints(
+                optimized_csv,
+                optimized_points,
+                wheelbase,
+                include_spacing_rule=False,
+                fixed_spacing=final_spacing,
+                include_turn_state=True,
+                speed_profile=str(self.get_parameter('speed_profile').value),
+                include_speed=True,
+                speed_steering_min=float(self.get_parameter('speed_steering_min').value),
+                speed_steering_max=float(self.get_parameter('speed_steering_max').value),
+                min_speed=float(self.get_parameter('min_speed').value),
+                max_speed=float(self.get_parameter('max_speed').value),
+                straight_steering_threshold=float(self.get_parameter('straight_steering_threshold').value),
+                turn_angle_threshold_deg=float(self.get_parameter('turn_angle_threshold_deg').value),
+                turn_distance_threshold_m=float(self.get_parameter('turn_distance_threshold_m').value),
+                gentle_steering_threshold=float(self.get_parameter('gentle_steering_threshold').value),
+                medium_steering_threshold=float(self.get_parameter('medium_steering_threshold').value),
+                straight_speed=float(self.get_parameter('straight_speed').value),
+                gentle_speed=float(self.get_parameter('gentle_speed').value),
+                medium_speed=float(self.get_parameter('medium_speed').value),
+                corner_speed=float(self.get_parameter('corner_speed').value),
+            )
 
             archived_paths = _archive_existing_outputs(output_directory, archive_directory)
-            destination = output_directory / final_csv.name
-            _normalize_final_csv(final_csv, destination)
+            destination = output_directory / ACTIVE_RACELINE_FILENAME
+            _normalize_final_csv(optimized_csv, destination)
 
             if archived_paths:
                 self.get_logger().info(
                     f'Archived {len(archived_paths)} existing item(s) into {archived_paths[0].parent}.'
                 )
+            self.get_logger().info(
+                f'Removed isolated map components: {removed_components} ({removed_pixels} pixels).'
+            )
+            self.get_logger().info(
+                'Manual path registration adjustment: '
+                f'rotation={math.degrees(angle):.4f} deg '
+                f'translation=({translation[0]:.4f}, {translation[1]:.4f}) m.'
+            )
+            self.get_logger().info(
+                f'Smoothed centerline points: {len(smoothed_centerline)} '
+                f'clearance={centerline_clearance:.4f} m.'
+            )
+            self.get_logger().info(
+                f'Optimized raceline points: {len(optimized_points)} '
+                f'clearance={optimized_clearance:.4f} m.'
+            )
             self.get_logger().info(
                 f'Active processed raceline saved to {destination} as s;x;y;yaw;kappa;v.'
             )
