@@ -57,7 +57,7 @@ def _resolve_processor_script() -> Path:
 
 
 def _resolve_optimizer_script() -> Path:
-    script = RACESTACK_REPO_ROOT / 'resource' / 'bala_raceline_optimizer' / 'optimize_manual_map_raceline.py'
+    script = RACESTACK_REPO_ROOT / 'resource' / 'optimize_manual_map_raceline.py'
     if script.is_file():
         return script
     raise FileNotFoundError(f'Could not locate optimizer script at {script}.')
@@ -379,13 +379,26 @@ class ProcessRacelineNode(Node):
             optimized_points = optimizer.remove_duplicate_endpoint(optimized_traj[:, 1:3])
             optimized_points = _roll_points_to_match_seed(optimized_points, smoothed_centerline[0])
             optimized_points = processor.resample_closed_exact(optimized_points, final_spacing)
-            for _ in range(3):
+            optimized_vertex_clearance = boundary_clearance + 0.5 * final_spacing + 0.002
+            optimized_clearance = float('-inf')
+            for _ in range(8):
                 optimized_points = processor.project_from_boundaries(
                     optimized_points,
                     field,
-                    boundary_clearance,
+                    optimized_vertex_clearance,
                 )
                 optimized_points = processor.resample_closed_exact(optimized_points, final_spacing)
+                optimized_samples = np.vstack([
+                    processor.straight_segment(
+                        optimized_points[index],
+                        optimized_points[(index + 1) % len(optimized_points)],
+                        spacing=min(0.01, final_spacing / 5.0),
+                    )
+                    for index in range(len(optimized_points))
+                ])
+                optimized_clearance = float(np.min(field.sample(field.signed_distance, optimized_samples)))
+                if optimized_clearance + 1e-4 >= boundary_clearance:
+                    break
 
             optimized_samples = np.vstack([
                 processor.straight_segment(
