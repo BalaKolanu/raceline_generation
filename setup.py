@@ -38,6 +38,7 @@ setup(
         'console_scripts': [
             'process_raceline = raceline_generation.process_raceline_node:main',
             'process_raceline_node = raceline_generation.process_raceline_node:main',
+            'edit_raceline = raceline_generation.raceline_editor:main',
         ],
     },
 )

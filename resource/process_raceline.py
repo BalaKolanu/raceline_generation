@@ -33,9 +33,9 @@ def parse_args() -> argparse.Namespace:
                         help="Defaults to <raceline_name>_output beside the raceline")
     parser.add_argument("--max-isolated-pixels", type=int, default=3)
     parser.add_argument("--wall-threshold", type=int, default=100)
-    parser.add_argument("--boundary-clearance", type=float, default=0.25,
+    parser.add_argument("--boundary-clearance", type=float, default=0.35,
                         help="Minimum centerline distance from occupied pixels [m]")
-    parser.add_argument("--wheelbase", type=float, default=0.25)
+    parser.add_argument("--wheelbase", type=float, default=0.324)
     parser.add_argument("--loop-radius", type=float, default=0.12,
                         help="Near-return distance used to identify local loops [m]")
     parser.add_argument("--max-local-loop", type=float, default=6.0,

@@ -154,13 +154,14 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('archive_directory', str(DEFAULT_ARCHIVE_DIR))
         self.declare_parameter('max_isolated_pixels', 3)
         self.declare_parameter('wall_threshold', 100)
-        self.declare_parameter('boundary_clearance', 0.25)
-        self.declare_parameter('wheelbase', 0.25)
+        self.declare_parameter('boundary_clearance', 0.35)
+        self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('loop_radius', 0.12)
         self.declare_parameter('max_local_loop', 6.0)
         self.declare_parameter('search_translation', 1.0)
         self.declare_parameter('search_rotation_deg', 15.0)
         self.declare_parameter('dense_spacing', 0.03)
+        self.declare_parameter('loop_cleanup_spacing', 0.15)
         self.declare_parameter('max_final_steering', 0.6)
         self.declare_parameter('final_spacing', 0.05)
         self.declare_parameter('speed_steering_min', 0.0)
@@ -178,7 +179,7 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('medium_speed', 4.0)
         self.declare_parameter('corner_speed', 1.5)
         self.declare_parameter('optimizer_spacing', 0.20)
-        self.declare_parameter('optimizer_clearance', 0.25)
+        self.declare_parameter('optimizer_clearance', 0.35)
         self.declare_parameter('optimizer_max_offset', 0.60)
         self.declare_parameter('optimizer_racing_line_weight', 0.24)
         self.declare_parameter('optimizer_apex_bias', 0.82)
@@ -279,8 +280,16 @@ class ProcessRacelineNode(Node):
                     },
                 )(),
             )
-            loop_cleaned = processor.erase_near_return_loops(
+            loop_cleanup_spacing = max(
+                float(self.get_parameter('loop_cleanup_spacing').value),
+                float(self.get_parameter('dense_spacing').value),
+            )
+            loop_cleanup_source = processor.resample_closed(
                 oriented,
+                spacing=loop_cleanup_spacing,
+            )
+            loop_cleaned = processor.erase_near_return_loops(
+                loop_cleanup_source,
                 float(self.get_parameter('loop_radius').value),
                 float(self.get_parameter('max_local_loop').value),
             )
