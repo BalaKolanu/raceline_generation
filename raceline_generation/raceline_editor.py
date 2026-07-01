@@ -480,7 +480,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--map', type=Path, default=DEFAULT_MAP_YAML, dest='map_yaml')
     parser.add_argument('--raceline', type=Path, default=DEFAULT_RACELINE)
     parser.add_argument('--output', type=Path, default=DEFAULT_RACELINE)
-    parser.add_argument('--boundary-clearance', type=float, default=0.35)
+    parser.add_argument('--boundary-clearance', type=float, default=0.4)
     parser.add_argument('--wall-threshold', type=int, default=100)
     parser.add_argument('--max-isolated-pixels', type=int, default=3)
     parser.add_argument('--wheelbase', type=float, default=0.324)
