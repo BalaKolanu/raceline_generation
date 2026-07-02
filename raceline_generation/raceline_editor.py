@@ -141,9 +141,10 @@ def _save_raceline_csv(
         turn_angle_threshold_deg,
         turn_distance_threshold_m,
     )
+    segment_ref = processor.build_segment_refs(turn_state)
     with path.open('w', newline='') as stream:
         writer = csv.writer(stream, delimiter=';')
-        writer.writerow(['s', 'x', 'y', 'yaw', 'kappa', 'v', 'turn_state'])
+        writer.writerow(['s', 'x', 'y', 'yaw', 'kappa', 'v', 'turn_state', 'segment_ref'])
         for index, point in enumerate(points):
             writer.writerow([
                 f'{index * spacing:.8f}',
@@ -153,6 +154,7 @@ def _save_raceline_csv(
                 f'{kappa[index]:.8f}',
                 f'{speed[index]:.8f}',
                 turn_state[index],
+                segment_ref[index],
             ])
 
 
@@ -480,7 +482,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--map', type=Path, default=DEFAULT_MAP_YAML, dest='map_yaml')
     parser.add_argument('--raceline', type=Path, default=DEFAULT_RACELINE)
     parser.add_argument('--output', type=Path, default=DEFAULT_RACELINE)
-    parser.add_argument('--boundary-clearance', type=float, default=0.4)
+    parser.add_argument('--boundary-clearance', type=float, default=0.15)
     parser.add_argument('--wall-threshold', type=int, default=100)
     parser.add_argument('--max-isolated-pixels', type=int, default=3)
     parser.add_argument('--wheelbase', type=float, default=0.324)

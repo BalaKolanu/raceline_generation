@@ -33,8 +33,10 @@ def parse_args() -> argparse.Namespace:
                         help="Defaults to <raceline_name>_output beside the raceline")
     parser.add_argument("--max-isolated-pixels", type=int, default=3)
     parser.add_argument("--wall-threshold", type=int, default=100)
-    parser.add_argument("--boundary-clearance", type=float, default=0.4,
+    parser.add_argument("--boundary-clearance", type=float, default=0.15,
                         help="Minimum centerline distance from occupied pixels [m]")
+    parser.add_argument("--preferred-clearance", type=float, default=0.50,
+                        help="Preferred wall clearance used for speed tapering [m]")
     parser.add_argument("--wheelbase", type=float, default=0.324)
     parser.add_argument("--loop-radius", type=float, default=0.12,
                         help="Near-return distance used to identify local loops [m]")
@@ -499,6 +501,26 @@ def classify_turn_states(
     return labels
 
 
+def build_segment_refs(turn_states: list[str]) -> list[str]:
+    if not turn_states:
+        return []
+
+    refs = [""] * len(turn_states)
+    segment_start = 0
+    segment_index = 0
+    while segment_start < len(turn_states):
+        state = turn_states[segment_start].strip().upper()
+        segment_end = segment_start + 1
+        while segment_end < len(turn_states) and turn_states[segment_end] == turn_states[segment_start]:
+            segment_end += 1
+        segment_ref = f"{segment_index:02d}:{state}"
+        for index in range(segment_start, segment_end):
+            refs[index] = segment_ref
+        segment_start = segment_end
+        segment_index += 1
+    return refs
+
+
 def smooth_with_steering_limit(points: np.ndarray, field: MapField,
                                clearance: float, wheelbase: float,
                                spacing: float, maximum_steering: float) -> np.ndarray:
@@ -537,18 +559,66 @@ def smooth_with_steering_limit(points: np.ndarray, field: MapField,
 
     final = resample_closed_exact(smoothed, spacing)
     final = project_from_boundaries(final, field, vertex_clearance)
-    # A few final uniform fairing passes remove kinks caused by wall projection.
-    for _ in range(300):
+    # If we still have a few hot spots in open space, relax only those high-curvature
+    # points instead of uniformly shrinking the whole lap.
+    for iteration in range(200):
+        steering = np.abs(steering_angles(final, wheelbase))
+        maximum = float(np.max(steering))
+        if maximum < maximum_steering:
+            break
+        laplacian = 0.5 * (np.roll(final, 1, axis=0)
+                           + np.roll(final, -1, axis=0)) - final
+        clearance_now = field.sample(field.signed_distance, final)
+        violation = np.clip(
+            (steering - target) / max(maximum_steering - target, 1e-6),
+            0.0,
+            3.0,
+        )
+        room = np.clip((clearance_now - vertex_clearance) / 0.6, 0.0, 1.0)
+        strength = 0.45 * violation * room
+        if float(np.max(strength)) <= 0.0:
+            break
+        final = project_from_boundaries(
+            final + strength[:, None] * laplacian,
+            field,
+            vertex_clearance,
+        )
+        if (iteration + 1) % 10 == 0:
+            final = resample_closed(final, count=len(final))
+            final = project_from_boundaries(final, field, vertex_clearance)
+    # A few final uniform fairing passes remove residual kinks caused by wall projection.
+    for _ in range(120):
         maximum = float(np.max(np.abs(steering_angles(final, wheelbase))))
         if maximum < maximum_steering:
             break
         laplacian = 0.5 * (np.roll(final, 1, axis=0)
                            + np.roll(final, -1, axis=0)) - final
         final = project_from_boundaries(
-            final + 0.16 * laplacian, field, vertex_clearance,
+            final + 0.12 * laplacian, field, vertex_clearance,
         )
     final = resample_closed_exact(final, spacing)
-    return project_from_boundaries(final, field, vertex_clearance)
+    final = project_from_boundaries(final, field, vertex_clearance)
+    # Exact uniform resampling can reintroduce a local kink at the seam. Do a
+    # few short rescue passes on the exported path itself so the final CSV
+    # respects the same steering limit as the internal smoothed path.
+    for _ in range(12):
+        steering = np.abs(steering_angles(final, wheelbase))
+        maximum = float(np.max(steering))
+        if maximum < maximum_steering:
+            break
+        laplacian = 0.5 * (np.roll(final, 1, axis=0)
+                           + np.roll(final, -1, axis=0)) - final
+        clearance_now = field.sample(field.signed_distance, final)
+        violation = np.clip((steering - 0.55) / 0.15, 0.0, 3.0)
+        room = np.clip((clearance_now - vertex_clearance) / 0.6, 0.0, 1.0)
+        final = project_from_boundaries(
+            final + (0.28 * violation * room)[:, None] * laplacian,
+            field,
+            vertex_clearance,
+        )
+        final = resample_closed_exact(final, spacing)
+        final = project_from_boundaries(final, field, vertex_clearance)
+    return final
 
 
 def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
@@ -569,7 +639,10 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
                      straight_speed: float = 10.0,
                      gentle_speed: float = 7.0,
                      medium_speed: float = 4.5,
-                     corner_speed: float = 2.0) -> None:
+                     corner_speed: float = 2.0,
+                     clearance_field: MapField | None = None,
+                     minimum_clearance: float = 0.15,
+                     preferred_clearance: float = 0.50) -> None:
     closed = np.vstack((waypoints, waypoints[0]))
     segment_lengths = np.linalg.norm(np.diff(closed, axis=0), axis=1)
     if fixed_spacing is None:
@@ -587,6 +660,7 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
         spacing_rule = np.asarray([spacing_for_steering(value) for value in steering])
         header.append("spacing_rule")
     turn_state = None
+    segment_ref = None
     if include_turn_state:
         point_spacing = fixed_spacing if fixed_spacing is not None else float(np.mean(segment_lengths))
         turn_state = classify_turn_states(
@@ -596,6 +670,8 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
             turn_distance_threshold_m,
         )
         header.append("turn_state")
+        segment_ref = build_segment_refs(turn_state)
+        header.append("segment_ref")
     speed = None
     if include_speed:
         if speed_profile == "linear":
@@ -615,6 +691,14 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
             )
         else:
             raise ValueError(f"Unsupported speed profile: {speed_profile}")
+        if clearance_field is not None:
+            if preferred_clearance <= minimum_clearance:
+                raise ValueError("Preferred clearance must be greater than minimum clearance")
+            clearance = clearance_field.sample(clearance_field.signed_distance, waypoints)
+            ratio = (clearance - minimum_clearance) / (preferred_clearance - minimum_clearance)
+            ratio = np.clip(ratio, 0.0, 1.0)
+            clearance_scale = ratio * ratio * (3.0 - 2.0 * ratio)
+            speed = min_speed + clearance_scale * (speed - min_speed)
         header.append("speed")
 
     for index in range(len(waypoints)):
@@ -631,6 +715,7 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
             row.append(spacing_rule[index])
         if turn_state is not None:
             row.append(turn_state[index])
+            row.append(segment_ref[index])
         if speed is not None:
             row.append(speed[index])
         rows.append(row)
@@ -792,7 +877,10 @@ def main() -> int:
                      straight_speed=args.straight_speed,
                      gentle_speed=args.gentle_speed,
                      medium_speed=args.medium_speed,
-                     corner_speed=args.corner_speed)
+                     corner_speed=args.corner_speed,
+                     clearance_field=field,
+                     minimum_clearance=args.boundary_clearance,
+                     preferred_clearance=args.preferred_clearance)
     save_overlay(final_overlay_png, field, final_waypoints)
     print(f"FINAL RACELINE PNG: {final_overlay_png}")
     # Keep the final line machine- and human-friendly: this is the requested

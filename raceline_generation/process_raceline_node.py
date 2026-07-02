@@ -116,12 +116,15 @@ def _normalize_final_csv(source_csv: Path, destination_csv: Path) -> None:
             )
         speed_field = 'speed' if 'speed' in reader.fieldnames else None
         turn_state_field = 'turn_state' if 'turn_state' in reader.fieldnames else None
+        segment_ref_field = 'segment_ref' if 'segment_ref' in reader.fieldnames else None
 
         with destination_csv.open('w', newline='') as destination_stream:
             writer = csv.writer(destination_stream, delimiter=';')
             header = ['s', 'x', 'y', 'yaw', 'kappa', 'v']
             if turn_state_field is not None:
                 header.append('turn_state')
+            if segment_ref_field is not None:
+                header.append('segment_ref')
             writer.writerow(header)
             for row in reader:
                 output_row = [
@@ -134,6 +137,8 @@ def _normalize_final_csv(source_csv: Path, destination_csv: Path) -> None:
                 ]
                 if turn_state_field is not None:
                     output_row.append(row[turn_state_field])
+                if segment_ref_field is not None:
+                    output_row.append(row[segment_ref_field])
                 writer.writerow(output_row)
 
 
@@ -154,7 +159,8 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('archive_directory', str(DEFAULT_ARCHIVE_DIR))
         self.declare_parameter('max_isolated_pixels', 3)
         self.declare_parameter('wall_threshold', 100)
-        self.declare_parameter('boundary_clearance', 0.4)
+        self.declare_parameter('boundary_clearance', 0.15)
+        self.declare_parameter('preferred_clearance', 0.50)
         self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('loop_radius', 0.12)
         self.declare_parameter('max_local_loop', 6.0)
@@ -179,7 +185,8 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('medium_speed', 4.0)
         self.declare_parameter('corner_speed', 1.5)
         self.declare_parameter('optimizer_spacing', 0.20)
-        self.declare_parameter('optimizer_clearance', 0.4)
+        self.declare_parameter('optimizer_clearance', 0.15)
+        self.declare_parameter('optimizer_preferred_clearance', 0.50)
         self.declare_parameter('optimizer_max_offset', 0.60)
         self.declare_parameter('optimizer_racing_line_weight', 0.24)
         self.declare_parameter('optimizer_apex_bias', 0.82)
@@ -255,6 +262,7 @@ class ProcessRacelineNode(Node):
                 processor.yaml.safe_dump(cleaned_metadata, stream, sort_keys=False)
 
             boundary_clearance = float(self.get_parameter('boundary_clearance').value)
+            preferred_clearance = float(self.get_parameter('preferred_clearance').value)
             wheelbase = float(self.get_parameter('wheelbase').value)
             final_spacing = float(self.get_parameter('final_spacing').value)
             field = processor.MapField(
@@ -263,9 +271,18 @@ class ProcessRacelineNode(Node):
                 int(self.get_parameter('wall_threshold').value),
             )
             input_path = processor.load_xy(manual_path)
+            self.get_logger().info(
+                f'Loaded manual path with {len(input_path)} points. '
+                f'Using minimum_clearance={boundary_clearance:.2f} m '
+                f'preferred_clearance={preferred_clearance:.2f} m.'
+            )
             registration_source = processor.resample_closed(
                 input_path,
                 spacing=float(self.get_parameter('dense_spacing').value),
+            )
+            self.get_logger().info(
+                f'Resampled registration seed to {len(registration_source)} points '
+                f'at dense_spacing={float(self.get_parameter("dense_spacing").value):.2f} m.'
             )
             oriented, angle, translation = processor.orient_path(
                 registration_source,
@@ -279,6 +296,9 @@ class ProcessRacelineNode(Node):
                         'search_rotation_deg': float(self.get_parameter('search_rotation_deg').value),
                     },
                 )(),
+            )
+            self.get_logger().info(
+                'Finished path registration; beginning loop cleanup and wall projection.'
             )
             loop_cleanup_spacing = max(
                 float(self.get_parameter('loop_cleanup_spacing').value),
@@ -307,6 +327,10 @@ class ProcessRacelineNode(Node):
                 spacing=float(self.get_parameter('dense_spacing').value),
             )
             dense = processor.project_from_boundaries(dense, field, boundary_clearance)
+            self.get_logger().info(
+                f'Generated dense projected path with {len(dense)} points; '
+                'building adaptive waypoint set.'
+            )
             steering = np.arctan(wheelbase * processor.curvature(dense))
             waypoints, _ = processor.adaptive_waypoints(dense, steering)
             for _ in range(10):
@@ -319,6 +343,10 @@ class ProcessRacelineNode(Node):
                 )
                 if len(waypoints) == previous_count:
                     break
+            self.get_logger().info(
+                f'Adaptive waypoint stage complete with {len(waypoints)} points; '
+                'starting steering-limited smoothing.'
+            )
 
             smoothed_centerline = processor.smooth_with_steering_limit(
                 waypoints,
@@ -354,10 +382,23 @@ class ProcessRacelineNode(Node):
 
             optimizer_field = optimizer.MapField(cleaned_yaml)
             optimizer_clearance = float(self.get_parameter('optimizer_clearance').value)
+            optimizer_preferred_clearance = float(
+                self.get_parameter('optimizer_preferred_clearance').value
+            )
             optimizer_spacing = float(self.get_parameter('optimizer_spacing').value)
             optimizer_seed = optimizer.smooth_periodic(smoothed_centerline, final_spacing)
             optimizer_base = optimizer.smooth_periodic(optimizer_seed, optimizer_spacing)
+            optimizer_base = processor.project_from_boundaries(
+                optimizer_base,
+                field,
+                optimizer_clearance,
+            )
             optimizer_normals = optimizer.normals_for(optimizer_base)
+            self.get_logger().info(
+                f'Smoothed centerline valid; launching optimizer on {len(optimizer_base)} base points '
+                f'with minimum_clearance={optimizer_clearance:.2f} m '
+                f'preferred_clearance={optimizer_preferred_clearance:.2f} m.'
+            )
             optimizer_bounds = optimizer.offset_bounds(
                 optimizer_field,
                 optimizer_base,
@@ -373,6 +414,8 @@ class ProcessRacelineNode(Node):
                 float(self.get_parameter('optimizer_racing_line_weight').value),
                 float(self.get_parameter('optimizer_apex_bias').value),
                 float(self.get_parameter('optimizer_outside_bias').value),
+                optimizer_field,
+                optimizer_preferred_clearance,
             )
             optimized_sparse = optimizer_base + optimizer_offsets[:, None] * optimizer_normals
             optimized_traj = optimizer.trajectory_from_path(
@@ -446,6 +489,9 @@ class ProcessRacelineNode(Node):
                 gentle_speed=float(self.get_parameter('gentle_speed').value),
                 medium_speed=float(self.get_parameter('medium_speed').value),
                 corner_speed=float(self.get_parameter('corner_speed').value),
+                clearance_field=field,
+                minimum_clearance=boundary_clearance,
+                preferred_clearance=preferred_clearance,
             )
 
             archived_paths = _archive_existing_outputs(output_directory, archive_directory)
@@ -470,7 +516,8 @@ class ProcessRacelineNode(Node):
             )
             self.get_logger().info(
                 f'Optimized raceline points: {len(optimized_points)} '
-                f'clearance={optimized_clearance:.4f} m.'
+                f'clearance={optimized_clearance:.4f} m '
+                f'(minimum={boundary_clearance:.2f} m, preferred={preferred_clearance:.2f} m).'
             )
             self.get_logger().info(
                 f'Active processed raceline saved to {destination} as s;x;y;yaw;kappa;v.'
