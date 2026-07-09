@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
                         help="Speed assignment method for the final path")
     parser.add_argument("--straight-steering-threshold", type=float, default=0.08,
                         help="Maximum |steering| that still counts as a straight [rad]")
-    parser.add_argument("--turn-angle-threshold-deg", type=float, default=30.0,
+    parser.add_argument("--turn-angle-threshold-deg", type=float, default=45.0,
                         help="Minimum accumulated heading change that counts as a turn [deg]")
     parser.add_argument("--turn-distance-threshold-m", type=float, default=1.5,
                         help="Maximum path distance within which the turn angle must be reached [m]")
@@ -145,6 +145,10 @@ def resample_closed_exact(points: np.ndarray, spacing: float) -> np.ndarray:
         np.interp(targets, cumulative, closed[:, 0]),
         np.interp(targets, cumulative, closed[:, 1]),
     ))
+
+
+def closed_path_length(points: np.ndarray) -> float:
+    return float(np.sum(np.linalg.norm(np.roll(points, -1, axis=0) - points, axis=1)))
 
 
 def clean_map(image: np.ndarray, threshold: int,
@@ -618,7 +622,49 @@ def smooth_with_steering_limit(points: np.ndarray, field: MapField,
         )
         final = resample_closed_exact(final, spacing)
         final = project_from_boundaries(final, field, vertex_clearance)
+    final = shorten_and_fair_path(
+        final,
+        field,
+        vertex_clearance,
+        wheelbase,
+        spacing,
+        maximum_steering,
+    )
     return final
+
+
+def shorten_and_fair_path(
+    points: np.ndarray,
+    field: MapField,
+    clearance: float,
+    wheelbase: float,
+    spacing: float,
+    maximum_steering: float,
+    iterations: int = 260,
+) -> np.ndarray:
+    """Prefer the shortest smooth path while preserving clearance and steering."""
+    current = resample_closed_exact(points, spacing)
+    current = project_from_boundaries(current, field, clearance)
+    current_length = closed_path_length(current)
+    for iteration in range(iterations):
+        previous = np.roll(current, 1, axis=0)
+        following = np.roll(current, -1, axis=0)
+        laplacian = 0.5 * (previous + following) - current
+        step = max(0.015, 0.12 * (1.0 - iteration / max(iterations - 1, 1)))
+        proposal = project_from_boundaries(current + step * laplacian, field, clearance)
+        proposal = resample_closed_exact(proposal, spacing)
+        proposal = project_from_boundaries(proposal, field, clearance)
+
+        clearance_now = field.sample(field.signed_distance, proposal)
+        if float(np.min(clearance_now)) + 1e-4 < clearance:
+            continue
+        if float(np.max(np.abs(steering_angles(proposal, wheelbase)))) >= maximum_steering:
+            continue
+        proposal_length = closed_path_length(proposal)
+        if proposal_length <= current_length + 1e-5:
+            current = proposal
+            current_length = proposal_length
+    return current
 
 
 def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
@@ -632,7 +678,7 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
                      min_speed: float = 1.0,
                      max_speed: float = 5.0,
                      straight_steering_threshold: float = 0.08,
-                     turn_angle_threshold_deg: float = 30.0,
+                     turn_angle_threshold_deg: float = 45.0,
                      turn_distance_threshold_m: float = 2.5,
                      gentle_steering_threshold: float = 0.20,
                      medium_steering_threshold: float = 0.38,

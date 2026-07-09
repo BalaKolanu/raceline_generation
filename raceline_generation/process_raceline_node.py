@@ -176,7 +176,7 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('max_speed', 4.0)
         self.declare_parameter('speed_profile', 'piecewise')
         self.declare_parameter('straight_steering_threshold', 0.08)
-        self.declare_parameter('turn_angle_threshold_deg', 30.0)
+        self.declare_parameter('turn_angle_threshold_deg', 45.0)
         self.declare_parameter('turn_distance_threshold_m', 1.5)
         self.declare_parameter('gentle_steering_threshold', 0.20)
         self.declare_parameter('medium_steering_threshold', 0.38)

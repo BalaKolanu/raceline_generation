@@ -496,7 +496,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--min-speed', type=float, default=1.0)
     parser.add_argument('--max-speed', type=float, default=10.0)
     parser.add_argument('--straight-steering-threshold', type=float, default=0.08)
-    parser.add_argument('--turn-angle-threshold-deg', type=float, default=30.0)
+    parser.add_argument('--turn-angle-threshold-deg', type=float, default=45.0)
     parser.add_argument('--turn-distance-threshold-m', type=float, default=1.5)
     parser.add_argument('--gentle-steering-threshold', type=float, default=0.20)
     parser.add_argument('--medium-steering-threshold', type=float, default=0.38)
