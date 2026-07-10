@@ -22,7 +22,10 @@ DEFAULT_MAP_DIR = RACESTACK_REPO_ROOT / 'maps'
 DEFAULT_MANUAL_PATH_DIR = RACESTACK_REPO_ROOT / 'manual_paths'
 DEFAULT_OUTPUT_DIR = RACESTACK_REPO_ROOT / 'paths'
 DEFAULT_ARCHIVE_DIR = RACESTACK_REPO_ROOT / 'old_paths'
+DEFAULT_LANE_DIR = RACESTACK_REPO_ROOT / 'lanes'
 ACTIVE_RACELINE_FILENAME = 'raceline.csv'
+ACTIVE_LANE_FILENAME = 'lane.csv'
+DEFAULT_PREVIEW_PNG = DEFAULT_LANE_DIR / 'lane_preview.png'
 
 
 def _find_single_file(directory: Path, patterns: tuple[str, ...], asset_name: str) -> Path:
@@ -119,7 +122,7 @@ def _normalize_final_csv(source_csv: Path, destination_csv: Path) -> None:
         segment_ref_field = 'segment_ref' if 'segment_ref' in reader.fieldnames else None
 
         with destination_csv.open('w', newline='') as destination_stream:
-            writer = csv.writer(destination_stream, delimiter=';')
+            writer = csv.writer(destination_stream, delimiter=';', lineterminator='\n')
             header = ['s', 'x', 'y', 'yaw', 'kappa', 'v']
             if turn_state_field is not None:
                 header.append('turn_state')
@@ -149,6 +152,117 @@ def _roll_points_to_match_seed(points: np.ndarray, seed_start: np.ndarray) -> np
     return np.roll(points, -start_idx, axis=0)
 
 
+def _load_lane_csv(path: Path) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]], np.ndarray, np.ndarray]:
+    with path.open(newline='') as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None:
+            raise ValueError(f'{path} has no header row.')
+        required = {'center_x', 'center_y', 'normal_x', 'normal_y', 'w_left', 'w_right'}
+        missing = sorted(required.difference(reader.fieldnames))
+        if missing:
+            raise ValueError(f'{path} is missing required lane columns: {", ".join(missing)}.')
+
+        center = []
+        normals = []
+        bounds = []
+        left = []
+        right = []
+        for row in reader:
+            point = np.asarray([float(row['center_x']), float(row['center_y'])], dtype=np.float64)
+            normal = np.asarray([float(row['normal_x']), float(row['normal_y'])], dtype=np.float64)
+            norm = float(np.linalg.norm(normal))
+            if norm <= 1e-9:
+                raise ValueError(f'{path} contains a zero normal near ({point[0]:.3f}, {point[1]:.3f}).')
+            normal /= norm
+            w_left = max(0.0, float(row['w_left']))
+            w_right = max(0.0, float(row['w_right']))
+            center.append(point)
+            normals.append(normal)
+            bounds.append((-w_left, w_right))
+            left.append(point - w_left * normal)
+            right.append(point + w_right * normal)
+
+    if len(center) < 4:
+        raise ValueError(f'{path} must contain at least four lane samples.')
+    return (
+        np.asarray(center, dtype=np.float64),
+        np.asarray(normals, dtype=np.float64),
+        bounds,
+        np.asarray(left, dtype=np.float64),
+        np.asarray(right, dtype=np.float64),
+    )
+
+
+def _clip_points_to_lane(
+    points: np.ndarray,
+    lane_center: np.ndarray,
+    lane_normals: np.ndarray,
+    lane_bounds: list[tuple[float, float]],
+) -> np.ndarray:
+    clipped = points.copy()
+    bounds = np.asarray(lane_bounds, dtype=np.float64)
+    for index, point in enumerate(clipped):
+        nearest = int(np.argmin(np.linalg.norm(lane_center - point, axis=1)))
+        normal = lane_normals[nearest]
+        alpha = float(np.dot(point - lane_center[nearest], normal))
+        clipped_alpha = float(np.clip(alpha, bounds[nearest, 0], bounds[nearest, 1]))
+        clipped[index] = point + (clipped_alpha - alpha) * normal
+    return clipped
+
+
+def _save_raceline_preview(
+    path: Path,
+    processor,
+    field,
+    lane_center: np.ndarray,
+    lane_left: np.ndarray,
+    lane_right: np.ndarray,
+    optimized_points: np.ndarray,
+) -> None:
+    import matplotlib
+
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    center_display = np.vstack((lane_center, lane_center[0]))
+    left_display = np.vstack((lane_left, lane_left[0]))
+    right_display = np.vstack((lane_right, lane_right[0]))
+    raceline_display = np.vstack((optimized_points, optimized_points[0]))
+
+    fig, axis = plt.subplots(figsize=(10, 10))
+    axis.imshow(
+        field.image,
+        cmap='gray',
+        vmin=0,
+        vmax=255,
+        origin='upper',
+        extent=field.extent,
+    )
+    axis.plot(left_display[:, 0], left_display[:, 1], color='#1f77b4', linewidth=1.2, label='left bound')
+    axis.plot(right_display[:, 0], right_display[:, 1], color='#ff7f0e', linewidth=1.2, label='right bound')
+    axis.plot(center_display[:, 0], center_display[:, 1], color='#00d12f', linewidth=1.3, alpha=0.75, label='lane center')
+    axis.plot(raceline_display[:, 0], raceline_display[:, 1], color='#d62728', linewidth=2.0, label='optimized raceline')
+    stride = max(1, len(lane_center) // 90)
+    for index in range(0, len(lane_center), stride):
+        axis.plot(
+            [lane_left[index, 0], lane_right[index, 0]],
+            [lane_left[index, 1], lane_right[index, 1]],
+            color='#1f77b4',
+            linewidth=0.6,
+            alpha=0.20,
+        )
+    axis.set_aspect('equal', adjustable='box')
+    axis.set_xlabel('map x [m]')
+    axis.set_ylabel('map y [m]')
+    axis.set_title('Lane-bounded optimized raceline')
+    axis.grid(alpha=0.2)
+    axis.legend(loc='upper right')
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 class ProcessRacelineNode(Node):
     def __init__(self) -> None:
         super().__init__('process_raceline')
@@ -157,9 +271,14 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('manual_path_directory', str(DEFAULT_MANUAL_PATH_DIR))
         self.declare_parameter('output_directory', str(DEFAULT_OUTPUT_DIR))
         self.declare_parameter('archive_directory', str(DEFAULT_ARCHIVE_DIR))
+        self.declare_parameter('lane_directory', str(DEFAULT_LANE_DIR))
+        self.declare_parameter('lane_csv', '')
+        self.declare_parameter('use_lane_bounds', True)
+        self.declare_parameter('save_preview', True)
+        self.declare_parameter('preview_png', str(DEFAULT_PREVIEW_PNG))
         self.declare_parameter('max_isolated_pixels', 3)
         self.declare_parameter('wall_threshold', 100)
-        self.declare_parameter('boundary_clearance', 0.15)
+        self.declare_parameter('boundary_clearance', 0.25)
         self.declare_parameter('preferred_clearance', 0.50)
         self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('loop_radius', 0.12)
@@ -185,7 +304,7 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('medium_speed', 4.0)
         self.declare_parameter('corner_speed', 1.5)
         self.declare_parameter('optimizer_spacing', 0.20)
-        self.declare_parameter('optimizer_clearance', 0.15)
+        self.declare_parameter('optimizer_clearance', 0.25)
         self.declare_parameter('optimizer_preferred_clearance', 0.50)
         self.declare_parameter('optimizer_max_offset', 0.60)
         self.declare_parameter('optimizer_racing_line_weight', 0.24)
@@ -226,6 +345,15 @@ class ProcessRacelineNode(Node):
         archive_directory = Path(
             str(self.get_parameter('archive_directory').value)
         ).expanduser().resolve()
+        lane_directory = Path(str(self.get_parameter('lane_directory').value)).expanduser().resolve()
+        lane_csv_param = str(self.get_parameter('lane_csv').value)
+        lane_csv = (
+            Path(lane_csv_param).expanduser().resolve()
+            if lane_csv_param
+            else lane_directory / ACTIVE_LANE_FILENAME
+        )
+        use_lane_bounds = bool(self.get_parameter('use_lane_bounds').value)
+        preview_png = Path(str(self.get_parameter('preview_png').value)).expanduser().resolve()
 
         map_yaml = _find_single_file(map_directory, ('*.yaml', '*.yml'), 'map')
         manual_path = _find_single_file(manual_path_directory, ('*.csv',), 'manual path')
@@ -386,26 +514,42 @@ class ProcessRacelineNode(Node):
                 self.get_parameter('optimizer_preferred_clearance').value
             )
             optimizer_spacing = float(self.get_parameter('optimizer_spacing').value)
-            optimizer_seed = optimizer.smooth_periodic(smoothed_centerline, final_spacing)
-            optimizer_base = optimizer.smooth_periodic(optimizer_seed, optimizer_spacing)
-            optimizer_base = processor.project_from_boundaries(
-                optimizer_base,
-                field,
-                optimizer_clearance,
-            )
-            optimizer_normals = optimizer.normals_for(optimizer_base)
-            self.get_logger().info(
-                f'Smoothed centerline valid; launching optimizer on {len(optimizer_base)} base points '
-                f'with minimum_clearance={optimizer_clearance:.2f} m '
-                f'preferred_clearance={optimizer_preferred_clearance:.2f} m.'
-            )
-            optimizer_bounds = optimizer.offset_bounds(
-                optimizer_field,
-                optimizer_base,
-                optimizer_normals,
-                optimizer_clearance,
-                float(self.get_parameter('optimizer_max_offset').value),
-            )
+            lane_left = None
+            lane_right = None
+            if use_lane_bounds:
+                if not lane_csv.is_file():
+                    raise FileNotFoundError(
+                        f'Lane CSV not found at {lane_csv}. Run generate_lanes first or set use_lane_bounds:=false.'
+                    )
+                optimizer_base, optimizer_normals, optimizer_bounds, lane_left, lane_right = _load_lane_csv(lane_csv)
+                optimizer_spacing = float(
+                    np.mean(np.linalg.norm(np.roll(optimizer_base, -1, axis=0) - optimizer_base, axis=1))
+                )
+                self.get_logger().info(
+                    f'Loaded lane bounds from {lane_csv}; launching optimizer on {len(optimizer_base)} '
+                    f'lane stations with preferred_clearance={optimizer_preferred_clearance:.2f} m.'
+                )
+            else:
+                optimizer_seed = optimizer.smooth_periodic(smoothed_centerline, final_spacing)
+                optimizer_base = optimizer.smooth_periodic(optimizer_seed, optimizer_spacing)
+                optimizer_base = processor.project_from_boundaries(
+                    optimizer_base,
+                    field,
+                    optimizer_clearance,
+                )
+                optimizer_normals = optimizer.normals_for(optimizer_base)
+                self.get_logger().info(
+                    f'Smoothed centerline valid; launching optimizer on {len(optimizer_base)} base points '
+                    f'with minimum_clearance={optimizer_clearance:.2f} m '
+                    f'preferred_clearance={optimizer_preferred_clearance:.2f} m.'
+                )
+                optimizer_bounds = optimizer.offset_bounds(
+                    optimizer_field,
+                    optimizer_base,
+                    optimizer_normals,
+                    optimizer_clearance,
+                    float(self.get_parameter('optimizer_max_offset').value),
+                )
             optimizer_offsets = optimizer.optimize_offsets(
                 optimizer_base,
                 optimizer_normals,
@@ -429,11 +573,18 @@ class ProcessRacelineNode(Node):
                 3.5,
             )
             optimized_points = optimizer.remove_duplicate_endpoint(optimized_traj[:, 1:3])
-            optimized_points = _roll_points_to_match_seed(optimized_points, smoothed_centerline[0])
+            optimized_points = _roll_points_to_match_seed(optimized_points, optimizer_base[0])
             optimized_points = processor.resample_closed_exact(optimized_points, final_spacing)
             optimized_vertex_clearance = boundary_clearance + 0.5 * final_spacing + 0.002
             optimized_clearance = float('-inf')
             for _ in range(8):
+                if use_lane_bounds:
+                    optimized_points = _clip_points_to_lane(
+                        optimized_points,
+                        optimizer_base,
+                        optimizer_normals,
+                        optimizer_bounds,
+                    )
                 optimized_points = processor.project_from_boundaries(
                     optimized_points,
                     field,
@@ -451,6 +602,15 @@ class ProcessRacelineNode(Node):
                 optimized_clearance = float(np.min(field.sample(field.signed_distance, optimized_samples)))
                 if optimized_clearance + 1e-4 >= boundary_clearance:
                     break
+
+            if use_lane_bounds:
+                optimized_points = _clip_points_to_lane(
+                    optimized_points,
+                    optimizer_base,
+                    optimizer_normals,
+                    optimizer_bounds,
+                )
+                optimized_points = processor.resample_closed_exact(optimized_points, final_spacing)
 
             optimized_samples = np.vstack([
                 processor.straight_segment(
@@ -497,6 +657,16 @@ class ProcessRacelineNode(Node):
             archived_paths = _archive_existing_outputs(output_directory, archive_directory)
             destination = output_directory / ACTIVE_RACELINE_FILENAME
             _normalize_final_csv(optimized_csv, destination)
+            if bool(self.get_parameter('save_preview').value) and lane_left is not None and lane_right is not None:
+                _save_raceline_preview(
+                    preview_png,
+                    processor,
+                    field,
+                    optimizer_base,
+                    lane_left,
+                    lane_right,
+                    optimized_points,
+                )
 
             if archived_paths:
                 self.get_logger().info(
@@ -519,6 +689,8 @@ class ProcessRacelineNode(Node):
                 f'clearance={optimized_clearance:.4f} m '
                 f'(minimum={boundary_clearance:.2f} m, preferred={preferred_clearance:.2f} m).'
             )
+            if bool(self.get_parameter('save_preview').value) and lane_left is not None and lane_right is not None:
+                self.get_logger().info(f'Lane-bounded raceline preview saved to {preview_png}.')
             self.get_logger().info(
                 f'Active processed raceline saved to {destination} as s;x;y;yaw;kappa;v.'
             )
