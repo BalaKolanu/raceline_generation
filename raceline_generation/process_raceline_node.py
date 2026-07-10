@@ -210,6 +210,82 @@ def _clip_points_to_lane(
     return clipped
 
 
+def _straighten_sparse_straights(
+    points: np.ndarray,
+    straight_spans: list[np.ndarray],
+    processor,
+    field,
+    lane_center: np.ndarray,
+    lane_normals: np.ndarray,
+    lane_bounds: list[tuple[float, float]],
+    minimum_clearance: float,
+    max_deviation: float,
+    lane_margin: float,
+    strength: float,
+) -> tuple[np.ndarray, int]:
+    if not straight_spans:
+        return points, 0
+
+    straightened = points.copy()
+    bounds = np.asarray(lane_bounds, dtype=np.float64)
+    changed = 0
+    for indices in straight_spans:
+        if len(indices) < 4:
+            continue
+        span_points = straightened[indices]
+        chord = span_points[-1] - span_points[0]
+        chord_length = float(np.linalg.norm(chord))
+        if chord_length < 1e-6:
+            continue
+
+        relative = span_points - span_points[0]
+        lateral_error = (
+            relative[:, 0] * chord[1] - relative[:, 1] * chord[0]
+        ) / chord_length
+        if float(np.max(np.abs(lateral_error))) > max_deviation:
+            continue
+
+        station_steps = np.linalg.norm(
+            lane_center[indices[1:]] - lane_center[indices[:-1]],
+            axis=1,
+        )
+        cumulative = np.insert(np.cumsum(station_steps), 0, 0.0)
+        if cumulative[-1] < 1e-6:
+            continue
+        phase = cumulative / cumulative[-1]
+        chord_candidate = span_points[0] + phase[:, None] * chord
+        blend = strength * np.sin(np.pi * phase)
+        candidate = span_points + blend[:, None] * (chord_candidate - span_points)
+
+        alphas = np.einsum(
+            'ij,ij->i',
+            candidate - lane_center[indices],
+            lane_normals[indices],
+        )
+        span_bounds = bounds[indices]
+        if np.any(alphas < span_bounds[:, 0] + lane_margin):
+            continue
+        if np.any(alphas > span_bounds[:, 1] - lane_margin):
+            continue
+
+        samples = np.vstack([
+            processor.straight_segment(
+                candidate[index],
+                candidate[index + 1],
+                spacing=0.01,
+            )
+            for index in range(len(candidate) - 1)
+        ])
+        clearance = float(np.min(field.sample(field.signed_distance, samples)))
+        if clearance + 1e-4 < minimum_clearance:
+            continue
+
+        straightened[indices[1:-1]] = candidate[1:-1]
+        changed += 1
+
+    return straightened, changed
+
+
 def _save_raceline_preview(
     path: Path,
     processor,
@@ -310,6 +386,11 @@ class ProcessRacelineNode(Node):
         self.declare_parameter('optimizer_racing_line_weight', 0.24)
         self.declare_parameter('optimizer_apex_bias', 0.82)
         self.declare_parameter('optimizer_outside_bias', 0.36)
+        self.declare_parameter('optimizer_straighten_straights', False)
+        self.declare_parameter('optimizer_straighten_min_length', 1.20)
+        self.declare_parameter('optimizer_straighten_max_deviation', 0.22)
+        self.declare_parameter('optimizer_straighten_lane_margin', 0.01)
+        self.declare_parameter('optimizer_straighten_strength', 0.15)
         self.declare_parameter('optimizer_max_iter', 300)
 
         self._startup_timer = self.create_timer(0.1, self._run_once)
@@ -399,11 +480,13 @@ class ProcessRacelineNode(Node):
                 int(self.get_parameter('wall_threshold').value),
             )
             input_path = processor.load_xy(manual_path)
-            self.get_logger().info(
-                f'Loaded manual path with {len(input_path)} points. '
-                f'Using minimum_clearance={boundary_clearance:.2f} m '
-                f'preferred_clearance={preferred_clearance:.2f} m.'
-            )
+            clearance_message = f'Using minimum_clearance={boundary_clearance:.2f} m.'
+            if preferred_clearance > boundary_clearance:
+                clearance_message = (
+                    f'Using minimum_clearance={boundary_clearance:.2f} m '
+                    f'preferred_clearance={preferred_clearance:.2f} m.'
+                )
+            self.get_logger().info(f'Loaded manual path with {len(input_path)} points. {clearance_message}')
             registration_source = processor.resample_closed(
                 input_path,
                 spacing=float(self.get_parameter('dense_spacing').value),
@@ -527,7 +610,7 @@ class ProcessRacelineNode(Node):
                 )
                 self.get_logger().info(
                     f'Loaded lane bounds from {lane_csv}; launching optimizer on {len(optimizer_base)} '
-                    f'lane stations with preferred_clearance={optimizer_preferred_clearance:.2f} m.'
+                    f'lane stations.'
                 )
             else:
                 optimizer_seed = optimizer.smooth_periodic(smoothed_centerline, final_spacing)
@@ -540,8 +623,7 @@ class ProcessRacelineNode(Node):
                 optimizer_normals = optimizer.normals_for(optimizer_base)
                 self.get_logger().info(
                     f'Smoothed centerline valid; launching optimizer on {len(optimizer_base)} base points '
-                    f'with minimum_clearance={optimizer_clearance:.2f} m '
-                    f'preferred_clearance={optimizer_preferred_clearance:.2f} m.'
+                    f'with minimum_clearance={optimizer_clearance:.2f} m.'
                 )
                 optimizer_bounds = optimizer.offset_bounds(
                     optimizer_field,
@@ -562,6 +644,28 @@ class ProcessRacelineNode(Node):
                 optimizer_preferred_clearance,
             )
             optimized_sparse = optimizer_base + optimizer_offsets[:, None] * optimizer_normals
+            if use_lane_bounds and bool(self.get_parameter('optimizer_straighten_straights').value):
+                straight_spans = optimizer.detect_straight_spans(
+                    optimizer_base,
+                    min_length=float(self.get_parameter('optimizer_straighten_min_length').value),
+                )
+                optimized_sparse, straightened_count = _straighten_sparse_straights(
+                    optimized_sparse,
+                    straight_spans,
+                    processor,
+                    field,
+                    optimizer_base,
+                    optimizer_normals,
+                    optimizer_bounds,
+                    boundary_clearance,
+                    float(self.get_parameter('optimizer_straighten_max_deviation').value),
+                    float(self.get_parameter('optimizer_straighten_lane_margin').value),
+                    float(self.get_parameter('optimizer_straighten_strength').value),
+                )
+                if straightened_count:
+                    self.get_logger().info(
+                        f'Straightened {straightened_count} lane-bounded straight span(s).'
+                    )
             optimized_traj = optimizer.trajectory_from_path(
                 optimized_sparse,
                 optimizer_field,
@@ -649,7 +753,7 @@ class ProcessRacelineNode(Node):
                 gentle_speed=float(self.get_parameter('gentle_speed').value),
                 medium_speed=float(self.get_parameter('medium_speed').value),
                 corner_speed=float(self.get_parameter('corner_speed').value),
-                clearance_field=field,
+                clearance_field=field if preferred_clearance > boundary_clearance else None,
                 minimum_clearance=boundary_clearance,
                 preferred_clearance=preferred_clearance,
             )
@@ -687,7 +791,7 @@ class ProcessRacelineNode(Node):
             self.get_logger().info(
                 f'Optimized raceline points: {len(optimized_points)} '
                 f'clearance={optimized_clearance:.4f} m '
-                f'(minimum={boundary_clearance:.2f} m, preferred={preferred_clearance:.2f} m).'
+                f'(minimum={boundary_clearance:.2f} m).'
             )
             if bool(self.get_parameter('save_preview').value) and lane_left is not None and lane_right is not None:
                 self.get_logger().info(f'Lane-bounded raceline preview saved to {preview_png}.')

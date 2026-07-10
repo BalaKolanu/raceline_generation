@@ -167,6 +167,63 @@ def _limit_closed_growth(values: np.ndarray, max_growth: float, passes: int = 3)
     return limited
 
 
+def _offset_bounds_allowing_recenter(
+    field,
+    base: np.ndarray,
+    normals: np.ndarray,
+    clearance: float,
+    max_offset: float,
+    sample_spacing: float = 0.02,
+) -> list[tuple[float, float]]:
+    samples = np.linspace(
+        -max_offset,
+        max_offset,
+        int(max_offset / sample_spacing) * 2 + 1,
+    )
+    zero_idx = int(np.argmin(np.abs(samples)))
+    bounds: list[tuple[float, float]] = []
+
+    for point, normal in zip(base, normals):
+        candidates = point[None, :] + samples[:, None] * normal[None, :]
+        distances = field.distance_at(candidates)
+        safe = distances >= clearance
+        if not np.any(safe):
+            best_idx = int(np.argmax(distances))
+            best_point = candidates[best_idx]
+            raise ValueError(
+                'No legal lane strip found near '
+                f'({point[0]:.2f}, {point[1]:.2f}); '
+                f'best distance={distances[best_idx]:.3f}m, required={clearance:.3f}m.'
+            )
+
+        runs: list[tuple[int, int]] = []
+        idx = 0
+        while idx < len(samples):
+            if not safe[idx]:
+                idx += 1
+                continue
+            start = idx
+            while idx + 1 < len(samples) and safe[idx + 1]:
+                idx += 1
+            runs.append((start, idx))
+            idx += 1
+
+        containing_zero = [run for run in runs if run[0] <= zero_idx <= run[1]]
+        if containing_zero:
+            lo_idx, hi_idx = containing_zero[0]
+        else:
+            lo_idx, hi_idx = min(
+                runs,
+                key=lambda run: (
+                    min(abs(samples[run[0]]), abs(samples[run[1]])),
+                    -abs(samples[run[1]] - samples[run[0]]),
+                ),
+            )
+        bounds.append((float(samples[lo_idx]), float(samples[hi_idx])))
+
+    return bounds
+
+
 class LaneGenerationNode(Node):
     def __init__(self) -> None:
         super().__init__('lane_generation')
@@ -411,7 +468,7 @@ class LaneGenerationNode(Node):
         lane_max_offset = float(self.get_parameter('lane_max_offset').value)
         for _ in range(max(0, int(self.get_parameter('lane_recenter_iterations').value))):
             normals = optimizer.normals_for(center)
-            bounds = optimizer.offset_bounds(
+            bounds = _offset_bounds_allowing_recenter(
                 optimizer_field,
                 center,
                 normals,
@@ -428,7 +485,7 @@ class LaneGenerationNode(Node):
             center = processor.project_from_boundaries(center, processor_field, boundary_clearance)
 
         normals = optimizer.normals_for(center)
-        bounds = optimizer.offset_bounds(
+        bounds = _offset_bounds_allowing_recenter(
             optimizer_field,
             center,
             normals,
