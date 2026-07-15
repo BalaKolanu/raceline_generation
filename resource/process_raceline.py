@@ -309,6 +309,7 @@ def project_from_boundaries(points: np.ndarray, field: MapField,
 
 
 def curvature(points: np.ndarray) -> np.ndarray:
+    """Three-point curvature used by the path-generation safety stages."""
     previous = np.roll(points, 1, axis=0)
     following = np.roll(points, -1, axis=0)
     a = points - previous
@@ -319,6 +320,73 @@ def curvature(points: np.ndarray) -> np.ndarray:
     result = np.zeros(len(points))
     valid = denominator > 1e-9
     result[valid] = 2.0 * cross[valid] / denominator[valid]
+    return result
+
+
+KAPPA_WINDOW_RADIUS_M = 0.30
+KAPPA_MIN_NEIGHBORS = 3
+KAPPA_WEIGHT_SIGMA_M = KAPPA_WINDOW_RADIUS_M * 0.60
+KAPPA_MAX_SAMPLE_GAP_M = 0.15
+
+
+def exported_curvature(points: np.ndarray) -> np.ndarray:
+    """Signed curvature from a local arc-length cubic fit on a closed loop.
+
+    This is used for the exported controller kappa field. It smooths isolated
+    waypoint offsets while preserving the generated x/y geometry exactly.
+    """
+    points = np.asarray(points, dtype=float)
+    count = len(points)
+    result = np.zeros(count)
+    if count < 3:
+        return result
+
+    for index in range(count):
+        samples = [(0.0, points[index])]
+        distance = 0.0
+        for offset in range(1, count):
+            before = (index - offset) % count
+            step_distance = np.linalg.norm(points[(before + 1) % count] - points[before])
+            if step_distance > KAPPA_MAX_SAMPLE_GAP_M:
+                break
+            distance += step_distance
+            samples.append((-distance, points[before]))
+            if distance >= KAPPA_WINDOW_RADIUS_M and offset >= KAPPA_MIN_NEIGHBORS:
+                break
+
+        distance = 0.0
+        for offset in range(1, count):
+            before = (index + offset - 1) % count
+            after = (index + offset) % count
+            step_distance = np.linalg.norm(points[after] - points[before])
+            if step_distance > KAPPA_MAX_SAMPLE_GAP_M:
+                break
+            distance += step_distance
+            samples.append((distance, points[after]))
+            if distance >= KAPPA_WINDOW_RADIUS_M and offset >= KAPPA_MIN_NEIGHBORS:
+                break
+
+        s = np.array([sample[0] for sample in samples])
+        local_points = np.array([sample[1] for sample in samples])
+        degree = min(3, len(samples) - 1)
+        if degree < 2:
+            continue
+        scale = max(float(np.max(np.abs(s))), 1e-9)
+        normalized_s = s / scale
+        weights = np.exp(-0.5 * (s / KAPPA_WEIGHT_SIGMA_M) ** 2)
+        basis = np.column_stack([normalized_s ** power for power in range(degree + 1)])
+        weighted_basis = basis * np.sqrt(weights)[:, None]
+        coefficients, _, _, _ = np.linalg.lstsq(
+            weighted_basis, local_points * np.sqrt(weights)[:, None], rcond=None,
+        )
+        first_derivative = coefficients[1] / scale
+        second_derivative = 2.0 * coefficients[2] / (scale * scale)
+        denominator = np.linalg.norm(first_derivative) ** 3
+        if denominator > 1e-10:
+            result[index] = (
+                first_derivative[0] * second_derivative[1]
+                - first_derivative[1] * second_derivative[0]
+            ) / denominator
     return result
 
 
@@ -668,7 +736,7 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
         distance = np.arange(len(waypoints), dtype=float) * fixed_spacing
     heading = np.arctan2(np.roll(waypoints, -1, axis=0)[:, 1] - waypoints[:, 1],
                          np.roll(waypoints, -1, axis=0)[:, 0] - waypoints[:, 0])
-    kappa = curvature(waypoints)
+    kappa = exported_curvature(waypoints)
     steering = np.arctan(wheelbase * kappa)
     rows: list[list[object]] = []
     header = ["index", "s", "x", "y", "yaw", "kappa", "steering"]
