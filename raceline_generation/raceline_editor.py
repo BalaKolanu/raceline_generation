@@ -94,57 +94,15 @@ def _save_raceline_csv(
     processor,
     *,
     spacing: float,
-    wheelbase: float,
-    speed_profile: str,
-    speed_steering_min: float,
-    speed_steering_max: float,
-    min_speed: float,
-    max_speed: float,
-    straight_steering_threshold: float,
-    turn_angle_threshold_deg: float,
-    turn_distance_threshold_m: float,
-    gentle_steering_threshold: float,
-    medium_steering_threshold: float,
-    straight_speed: float,
-    gentle_speed: float,
-    medium_speed: float,
-    corner_speed: float,
 ) -> None:
     heading = np.arctan2(
         np.roll(points, -1, axis=0)[:, 1] - points[:, 1],
         np.roll(points, -1, axis=0)[:, 0] - points[:, 0],
     )
     kappa = processor.curvature(points)
-    steering = np.arctan(wheelbase * kappa)
-    if speed_profile == 'linear':
-        speed = processor.speed_from_previous_steering(
-            steering,
-            speed_steering_min,
-            speed_steering_max,
-            min_speed,
-            max_speed,
-        )
-    else:
-        speed = processor.piecewise_speed_from_previous_steering(
-            steering,
-            straight_steering_threshold,
-            gentle_steering_threshold,
-            medium_steering_threshold,
-            straight_speed,
-            gentle_speed,
-            medium_speed,
-            corner_speed,
-        )
-    turn_state = processor.classify_turn_states(
-        heading,
-        spacing,
-        turn_angle_threshold_deg,
-        turn_distance_threshold_m,
-    )
-    segment_ref = processor.build_segment_refs(turn_state)
     with path.open('w', newline='') as stream:
         writer = csv.writer(stream, delimiter=';')
-        writer.writerow(['s', 'x', 'y', 'yaw', 'kappa', 'v', 'turn_state', 'segment_ref'])
+        writer.writerow(['s', 'x', 'y', 'yaw', 'kappa', 'segment'])
         for index, point in enumerate(points):
             writer.writerow([
                 f'{index * spacing:.8f}',
@@ -152,9 +110,7 @@ def _save_raceline_csv(
                 f'{point[1]:.8f}',
                 f'{heading[index]:.8f}',
                 f'{kappa[index]:.8f}',
-                f'{speed[index]:.8f}',
-                turn_state[index],
-                segment_ref[index],
+                'segment_0',
             ])
 
 
@@ -171,20 +127,6 @@ class EditorConfig:
     control_spacing: float
     max_final_steering: float
     smoothing_iterations: int
-    speed_profile: str
-    speed_steering_min: float
-    speed_steering_max: float
-    min_speed: float
-    max_speed: float
-    straight_steering_threshold: float
-    turn_angle_threshold_deg: float
-    turn_distance_threshold_m: float
-    gentle_steering_threshold: float
-    medium_steering_threshold: float
-    straight_speed: float
-    gentle_speed: float
-    medium_speed: float
-    corner_speed: float
 
 
 class RacelineEditor:
@@ -452,21 +394,6 @@ class RacelineEditor:
             self.points,
             self.processor,
             spacing=self.config.final_spacing,
-            wheelbase=self.config.wheelbase,
-            speed_profile=self.config.speed_profile,
-            speed_steering_min=self.config.speed_steering_min,
-            speed_steering_max=self.config.speed_steering_max,
-            min_speed=self.config.min_speed,
-            max_speed=self.config.max_speed,
-            straight_steering_threshold=self.config.straight_steering_threshold,
-            turn_angle_threshold_deg=self.config.turn_angle_threshold_deg,
-            turn_distance_threshold_m=self.config.turn_distance_threshold_m,
-            gentle_steering_threshold=self.config.gentle_steering_threshold,
-            medium_steering_threshold=self.config.medium_steering_threshold,
-            straight_speed=self.config.straight_speed,
-            gentle_speed=self.config.gentle_speed,
-            medium_speed=self.config.medium_speed,
-            corner_speed=self.config.corner_speed,
         )
         clearance = self._min_clearance(self.points)
         print(f'Saved raceline to {self.config.output_csv} with min clearance {clearance:.3f} m.')
@@ -490,20 +417,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--control-spacing', type=float, default=1.0)
     parser.add_argument('--max-final-steering', type=float, default=0.6)
     parser.add_argument('--smoothing-iterations', type=int, default=220)
-    parser.add_argument('--speed-profile', choices=('piecewise', 'linear'), default='piecewise')
-    parser.add_argument('--speed-steering-min', type=float, default=0.0)
-    parser.add_argument('--speed-steering-max', type=float, default=0.58)
-    parser.add_argument('--min-speed', type=float, default=1.0)
-    parser.add_argument('--max-speed', type=float, default=10.0)
-    parser.add_argument('--straight-steering-threshold', type=float, default=0.08)
-    parser.add_argument('--turn-angle-threshold-deg', type=float, default=45.0)
-    parser.add_argument('--turn-distance-threshold-m', type=float, default=1.5)
-    parser.add_argument('--gentle-steering-threshold', type=float, default=0.20)
-    parser.add_argument('--medium-steering-threshold', type=float, default=0.38)
-    parser.add_argument('--straight-speed', type=float, default=10.0)
-    parser.add_argument('--gentle-speed', type=float, default=6.0)
-    parser.add_argument('--medium-speed', type=float, default=4.0)
-    parser.add_argument('--corner-speed', type=float, default=1.5)
     return parser
 
 
@@ -522,20 +435,6 @@ def main() -> None:
         control_spacing=float(args.control_spacing),
         max_final_steering=float(args.max_final_steering),
         smoothing_iterations=int(args.smoothing_iterations),
-        speed_profile=str(args.speed_profile),
-        speed_steering_min=float(args.speed_steering_min),
-        speed_steering_max=float(args.speed_steering_max),
-        min_speed=float(args.min_speed),
-        max_speed=float(args.max_speed),
-        straight_steering_threshold=float(args.straight_steering_threshold),
-        turn_angle_threshold_deg=float(args.turn_angle_threshold_deg),
-        turn_distance_threshold_m=float(args.turn_distance_threshold_m),
-        gentle_steering_threshold=float(args.gentle_steering_threshold),
-        medium_steering_threshold=float(args.medium_steering_threshold),
-        straight_speed=float(args.straight_speed),
-        gentle_speed=float(args.gentle_speed),
-        medium_speed=float(args.medium_speed),
-        corner_speed=float(args.corner_speed),
     )
     editor = RacelineEditor(processor, config)
     editor.run()

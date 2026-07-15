@@ -35,8 +35,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wall-threshold", type=int, default=100)
     parser.add_argument("--boundary-clearance", type=float, default=0.15,
                         help="Minimum centerline distance from occupied pixels [m]")
-    parser.add_argument("--preferred-clearance", type=float, default=0.50,
-                        help="Preferred wall clearance used for speed tapering [m]")
     parser.add_argument("--wheelbase", type=float, default=0.324)
     parser.add_argument("--loop-radius", type=float, default=0.12,
                         help="Near-return distance used to identify local loops [m]")
@@ -52,35 +50,6 @@ def parse_args() -> argparse.Namespace:
                         help="Maximum absolute steering in the final CSV [rad]")
     parser.add_argument("--final-spacing", type=float, default=0.05,
                         help="Point spacing in the final smoothed CSV [m]")
-    parser.add_argument("--speed-steering-min", type=float, default=0.0,
-                        help="Steering angle that maps to max speed [rad]")
-    parser.add_argument("--speed-steering-max", type=float, default=0.58,
-                        help="Steering angle that maps to min speed [rad]")
-    parser.add_argument("--min-speed", type=float, default=1.0,
-                        help="Minimum output speed [m/s]")
-    parser.add_argument("--max-speed", type=float, default=5.0,
-                        help="Maximum output speed [m/s]")
-    parser.add_argument("--speed-profile", choices=("piecewise", "linear"),
-                        default="piecewise",
-                        help="Speed assignment method for the final path")
-    parser.add_argument("--straight-steering-threshold", type=float, default=0.08,
-                        help="Maximum |steering| that still counts as a straight [rad]")
-    parser.add_argument("--turn-angle-threshold-deg", type=float, default=45.0,
-                        help="Minimum accumulated heading change that counts as a turn [deg]")
-    parser.add_argument("--turn-distance-threshold-m", type=float, default=1.5,
-                        help="Maximum path distance within which the turn angle must be reached [m]")
-    parser.add_argument("--gentle-steering-threshold", type=float, default=0.20,
-                        help="Maximum |steering| for the gentle-bend speed tier [rad]")
-    parser.add_argument("--medium-steering-threshold", type=float, default=0.38,
-                        help="Maximum |steering| for the medium-turn speed tier [rad]")
-    parser.add_argument("--straight-speed", type=float, default=10.0,
-                        help="Speed used on straights [m/s]")
-    parser.add_argument("--gentle-speed", type=float, default=7.0,
-                        help="Speed used on gentle bends [m/s]")
-    parser.add_argument("--medium-speed", type=float, default=4.5,
-                        help="Speed used on medium turns [m/s]")
-    parser.add_argument("--corner-speed", type=float, default=2.0,
-                        help="Speed used in tight corners [m/s]")
     return parser.parse_args()
 
 
@@ -672,6 +641,8 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
                      fixed_spacing: float | None = None,
                      include_speed: bool = False,
                      include_turn_state: bool = False,
+                     include_segment: bool = False,
+                     segment_label: str = "segment_0",
                      speed_profile: str = "piecewise",
                      speed_steering_min: float = 0.0,
                      speed_steering_max: float = 0.58,
@@ -718,6 +689,8 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
         header.append("turn_state")
         segment_ref = build_segment_refs(turn_state)
         header.append("segment_ref")
+    elif include_segment:
+        header.append("segment")
     speed = None
     if include_speed:
         if speed_profile == "linear":
@@ -762,6 +735,8 @@ def export_waypoints(path: Path, waypoints: np.ndarray, wheelbase: float,
         if turn_state is not None:
             row.append(turn_state[index])
             row.append(segment_ref[index])
+        elif include_segment:
+            row.append(segment_label)
         if speed is not None:
             row.append(speed[index])
         rows.append(row)
@@ -909,24 +884,9 @@ def main() -> int:
         return 2
     export_waypoints(final_csv, final_waypoints, args.wheelbase,
                      include_spacing_rule=False, fixed_spacing=args.final_spacing,
-                     include_turn_state=True,
-                     speed_profile=args.speed_profile,
-                     include_speed=True,
-                     speed_steering_min=args.speed_steering_min,
-                     speed_steering_max=args.speed_steering_max,
-                     min_speed=args.min_speed, max_speed=args.max_speed,
-                     straight_steering_threshold=args.straight_steering_threshold,
-                     turn_angle_threshold_deg=args.turn_angle_threshold_deg,
-                     turn_distance_threshold_m=args.turn_distance_threshold_m,
-                     gentle_steering_threshold=args.gentle_steering_threshold,
-                     medium_steering_threshold=args.medium_steering_threshold,
-                     straight_speed=args.straight_speed,
-                     gentle_speed=args.gentle_speed,
-                     medium_speed=args.medium_speed,
-                     corner_speed=args.corner_speed,
-                     clearance_field=field,
-                     minimum_clearance=args.boundary_clearance,
-                     preferred_clearance=args.preferred_clearance)
+                     include_turn_state=False,
+                     include_segment=True,
+                     include_speed=False)
     save_overlay(final_overlay_png, field, final_waypoints)
     print(f"FINAL RACELINE PNG: {final_overlay_png}")
     # Keep the final line machine- and human-friendly: this is the requested
