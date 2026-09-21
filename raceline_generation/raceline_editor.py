@@ -18,8 +18,8 @@ except ImportError:  # pragma: no cover - available in ROS runtime
     get_package_share_directory = None
 
 
-RACESTACK_REPO_ROOT = Path('/home/nvidia/spring26_ws/src/racestack')
-RACELINE_GENERATION_REPO_ROOT = Path('/home/nvidia/spring26_ws/src/raceline_generation')
+RACESTACK_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/racestack')
+RACELINE_GENERATION_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/raceline_generation')
 DEFAULT_MAP_YAML = RACESTACK_REPO_ROOT / 'maps' / 'racetrack.yaml'
 DEFAULT_RACELINE = RACESTACK_REPO_ROOT / 'paths' / 'raceline.csv'
 

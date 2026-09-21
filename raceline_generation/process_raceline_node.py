@@ -16,8 +16,8 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 
 
-RACESTACK_REPO_ROOT = Path('/home/nvidia/spring26_ws/src/racestack')
-RACELINE_GENERATION_REPO_ROOT = Path('/home/nvidia/spring26_ws/src/raceline_generation')
+RACESTACK_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/racestack')
+RACELINE_GENERATION_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/raceline_generation')
 DEFAULT_MAP_DIR = RACESTACK_REPO_ROOT / 'maps'
 DEFAULT_MANUAL_PATH_DIR = RACESTACK_REPO_ROOT / 'manual_paths'
 DEFAULT_OUTPUT_DIR = RACESTACK_REPO_ROOT / 'paths'
