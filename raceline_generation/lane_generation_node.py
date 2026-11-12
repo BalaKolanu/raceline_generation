@@ -21,11 +21,10 @@ from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 
 
-RACESTACK_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/racestack')
 RACELINE_GENERATION_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/raceline_generation')
-DEFAULT_MAP_DIR = RACESTACK_REPO_ROOT / 'maps'
-DEFAULT_MANUAL_PATH_DIR = RACESTACK_REPO_ROOT / 'manual_paths'
-DEFAULT_OUTPUT_DIR = RACESTACK_REPO_ROOT / 'lanes'
+DEFAULT_MAP_DIR = RACELINE_GENERATION_REPO_ROOT / 'maps'
+DEFAULT_MANUAL_PATH_DIR = RACELINE_GENERATION_REPO_ROOT / 'manual_paths'
+DEFAULT_OUTPUT_DIR = RACELINE_GENERATION_REPO_ROOT / 'lanes'
 ACTIVE_LANE_FILENAME = 'lane.csv'
 LANE_PREVIEW_FILENAME = 'lane_preview.png'
 
@@ -73,7 +72,7 @@ def _resolve_processor_script() -> Path:
 
 
 def _resolve_optimizer_script() -> Path:
-    script = RACESTACK_REPO_ROOT / 'resource' / 'optimize_manual_map_raceline.py'
+    script = RACELINE_GENERATION_REPO_ROOT / 'resource' / 'optimize_manual_map_raceline.py'
     if script.is_file():
         return script
     raise FileNotFoundError(f'Could not locate optimizer script at {script}.')

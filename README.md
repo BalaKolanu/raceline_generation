@@ -1,47 +1,79 @@
 # raceline_generation
 
-ROS 2 Python package for raceline generation tools and nodes.
+## Purpose
 
-This package now owns the raceline-processing pipeline:
+ROS 2 package for generating lane bounds and optimizing a raceline from a map
+and a manually recorded seed path.
 
-- `process_raceline`
-- `process_raceline_node`
-- `generate_lanes`
-- `resource/process_raceline.py`
+## Use
 
-The processing code still reads its input map and manual path from the `racestack`
-repository and writes the active processed path back to `racestack/paths`.
+The normal pipeline is launched by f1tenth_bringup:
 
-## Lane Generation
+~~~bash
+ros2 launch f1tenth_bringup process_raceline.launch.py
+~~~
 
-`generate_lanes` uses the manual path only as a route seed. It registers and
-cleans the seed against the map, creates a clearance-safe centerline, then
-samples left/right safe offsets along the centerline normals.
+The pipeline is:
 
-Default inputs:
-- map: `/home/nvidia/f1tenth_ws/src/racestack/maps/*.yaml`
-- manual seed path: `/home/nvidia/f1tenth_ws/src/racestack/manual_paths/*.csv`
+~~~text
+map + manual seed
+       |
+       v
+generate_lanes
+       |
+       v
+lane.csv
+       |
+       v
+process_raceline
+       |
+       v
+paths/raceline.csv
+~~~
 
-Default outputs:
-- lane CSV: `/home/nvidia/f1tenth_ws/src/racestack/lanes/lane.csv`
-- preview PNG: `/home/nvidia/f1tenth_ws/src/racestack/lanes/lane_preview.png`
-- ROS path: `/lane/center`
+Individual nodes can also be run:
 
-The CSV is the main lane artifact. Each row stores a center point, local normal,
-left/right safe widths, and left/right sample points. Boundary `Path` publishing
-can be enabled with `publish_boundary_paths:=true`, but for optimization the
-station-based widths are the safer representation.
-
-Run:
-```bash
+~~~bash
 ros2 run raceline_generation generate_lanes
-```
-
-Then generate the active raceline inside those lane bounds:
-```bash
 ros2 run raceline_generation process_raceline
-```
+~~~
 
-`process_raceline` uses `racestack/lanes/lane.csv` by default when
-`use_lane_bounds:=true`, and updates the same preview PNG with the optimized
-raceline overlay.
+## Configuration
+
+The bringup launch controls:
+
+- map_directory
+- manual_path_directory
+- fallback_path_directory
+- lane_directory
+- output_directory
+- archive_directory
+- preview_png
+
+The generated files are stored under f1tenth_bringup:
+
+- maps/
+- manual_paths/
+- lanes/
+- paths/
+- old_paths/
+
+The optimizer implementation is resource/optimize_manual_map_raceline.py.
+The shared map-processing functions are in resource/process_raceline.py.
+
+## Interfaces and behavior
+
+The pipeline is offline with respect to ROS vehicle topics. It reads a map and
+closed seed CSV, cleans isolated map pixels, registers the seed to the map,
+computes safe lane bounds, optimizes lateral offsets, checks wall clearance,
+and writes a fixed-spacing raceline CSV plus preview images.
+
+Canonical entry points are generate_lanes, process_raceline, and edit_raceline.
+The duplicate process_raceline_node entry point is intentionally not registered.
+
+## Theory and further reading
+
+The optimizer uses distance fields, curvature-aware path processing, lane-bound
+constraints, and steering-limited smoothing. See the
+[F1TENTH raceline resources](https://f1tenth.github.io/website/learn/) and the
+[minimum-curvature racing-line overview](https://docs.nvidia.com/drive/driveworks-3.5/dwx-vehicle-motion.html).

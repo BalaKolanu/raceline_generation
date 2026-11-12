@@ -16,13 +16,12 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 
 
-RACESTACK_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/racestack')
 RACELINE_GENERATION_REPO_ROOT = Path('/home/nvidia/f1tenth_ws/src/raceline_generation')
-DEFAULT_MAP_DIR = RACESTACK_REPO_ROOT / 'maps'
-DEFAULT_MANUAL_PATH_DIR = RACESTACK_REPO_ROOT / 'manual_paths'
-DEFAULT_OUTPUT_DIR = RACESTACK_REPO_ROOT / 'paths'
-DEFAULT_ARCHIVE_DIR = RACESTACK_REPO_ROOT / 'old_paths'
-DEFAULT_LANE_DIR = RACESTACK_REPO_ROOT / 'lanes'
+DEFAULT_MAP_DIR = RACELINE_GENERATION_REPO_ROOT / 'maps'
+DEFAULT_MANUAL_PATH_DIR = RACELINE_GENERATION_REPO_ROOT / 'manual_paths'
+DEFAULT_OUTPUT_DIR = RACELINE_GENERATION_REPO_ROOT / 'paths'
+DEFAULT_ARCHIVE_DIR = RACELINE_GENERATION_REPO_ROOT / 'old_paths'
+DEFAULT_LANE_DIR = RACELINE_GENERATION_REPO_ROOT / 'lanes'
 ACTIVE_RACELINE_FILENAME = 'raceline.csv'
 ACTIVE_LANE_FILENAME = 'lane.csv'
 DEFAULT_PREVIEW_PNG = DEFAULT_LANE_DIR / 'lane_preview.png'
@@ -60,7 +59,7 @@ def _resolve_processor_script() -> Path:
 
 
 def _resolve_optimizer_script() -> Path:
-    script = RACESTACK_REPO_ROOT / 'resource' / 'optimize_manual_map_raceline.py'
+    script = RACELINE_GENERATION_REPO_ROOT / 'resource' / 'optimize_manual_map_raceline.py'
     if script.is_file():
         return script
     raise FileNotFoundError(f'Could not locate optimizer script at {script}.')
